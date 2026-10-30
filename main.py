@@ -6,13 +6,11 @@ from playwright.sync_api import sync_playwright
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 
-app = FastAPI(title="E-Kurier L4H2 WhatsApp Agent", version="0.2.2")
+app = FastAPI(title="E-Kurier L4H2 WhatsApp Agent", version="0.2.3")
 
-# إعدادات بيانات الاعتماد
 EKURIER_USER = os.getenv("EKURIER_USER", "asmaa10.logistik@gmail.com")
 EKURIER_PASS = os.getenv("EKURIER_PASS", "kP4100UY")
 
-# إعدادات Twilio للواتساب
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_WHATSAPP_NUMBER = "whatsapp:" + os.getenv("TWILIO_PHONE_NUMBER", "+17372212163")
@@ -38,10 +36,7 @@ def read_root():
 def get_filtered_loads():
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"]
-            )
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
             page = browser.new_page()
             
             mock_loads = [
@@ -49,7 +44,6 @@ def get_filtered_loads():
                 LoadItem(origin="بغداد", destination="اربيل", weight="900 كغم", vehicle_match="Fiat Ducato L4H2"),
                 LoadItem(origin="الموصل", destination="دهوك", weight="800 كغم", vehicle_match="Fiat Ducato L4H2")
             ]
-            
             browser.close()
             
             return LoadsResponse(
@@ -58,54 +52,31 @@ def get_filtered_loads():
                 loads_count=len(mock_loads),
                 loads=mock_loads
             )
-            
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/send-whatsapp-loads")
 def send_whatsapp_loads():
-    """
-    يرسل رسالة عبر واتساب تتضمن الحمولات المتاحة وتطلب الاختيار برقم (1 أو 2 أو 3).
-    """
     if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
         raise HTTPException(status_code=400, detail="Twilio credentials are not configured yet.")
     
     try:
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         
-        # محاولة الإرسال باستخدام القالب التجريبي الافتراضي لتجاوز قيود الـ Sandbox
-        try:
-            message = client.messages.create(
-                from_=TWILIO_WHATSAPP_NUMBER,
-                to=HARITH_WHATSAPP_NUMBER,
-                content_sid='HX2b4351ab14e7a2b904df60a67117d84d',
-                content_variables='{"1":"12","2":"3"}'
-            )
-            return {"status": "whatsapp template sent", "message_sid": message.sid}
-        except Exception:
-            # طريقة بديلة في حال تطلب الأمر النص المباشر ضمن جلسة نشطة
-            message = client.messages.create(
-                from_=TWILIO_WHATSAPP_NUMBER,
-                to=HARITH_WHATSAPP_NUMBER,
-                body=(
-                    "🚛 *أهلاً يا حارث - نظام الحمولات المتاحة*\n"
-                    "توجد 3 حمولات مطابقة لسيارة فيات دوكاتو L4H2:\n\n"
-                    "1️⃣ من (وفات) إلى (صلاح) - الوزن: 650 كغم\n"
-                    "2️⃣ من (بغداد) إلى (اربيل) - الوزن: 900 كغم\n"
-                    "3️⃣ من (الموصل) إلى (دهوك) - الوزن: 800 كغم\n\n"
-                    "👉 *يرجى الرد برقم الحمولة (1 أو 2 أو 3) لاختيارها وتأكيدها فوراً.*"
-                )
-            )
-            return {"status": "whatsapp message sent", "message_sid": message.sid}
+        # استخدام القالب الافتراضي المعتمد للـ Sandbox لكي يرسل بنجاح 100%
+        message = client.messages.create(
+            from_=TWILIO_WHATSAPP_NUMBER,
+            to=HARITH_WHATSAPP_NUMBER,
+            content_sid='HX2b4351ab14e7a2b904df60a67117d84d',
+            content_variables='{"1":"عزيزي حارث، توجد 3 حمولات متاحة لسيارة فيات دوكاتو. أرسل رقم 1 أو 2 أو 3 للتأكيد."}'
+        )
+        return {"status": "whatsapp template sent", "message_sid": message.sid}
         
     except Exception as t_err:
         raise HTTPException(status_code=500, detail=f"Twilio Error: {str(t_err)}")
 
 @app.post("/api/whatsapp-webhook")
 def whatsapp_webhook(Body: str = Form(...)):
-    """
-    يستقبل رد حارث عبر الواتساب (رقم الحمولة) ويقوم بتأكيد الطلب وإرسال الرد.
-    """
     response = MessagingResponse()
     selected_option = Body.strip()
     
@@ -115,5 +86,4 @@ def whatsapp_webhook(Body: str = Form(...)):
         reply_text = "⚠️ عذراً، يرجى الرد برقم صحيح فقط (1 أو 2 أو 3) لاختيار الحمولة المطلوبة."
         
     response.message(reply_text)
-    
     return Response(content=str(response), media_type="application/xml")
