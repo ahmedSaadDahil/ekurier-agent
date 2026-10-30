@@ -67,10 +67,10 @@ def get_filtered_loads():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/call-harith")
+@app.get("/api/call-harith")
 def call_harith_for_loads():
     """
-    يبدأ مكالمة تفاعلية مع حارث عبر Twilio لعرض الحمولات المتاحة وسؤاله عن الاختيار.
+    يبدأ مكالمة تفاعلية مع حارث عبر Twilio لعرض الحمولات المتاحة وسؤاله عن الاختيار (متاح عبر GET لسهولة التجربة من المتصفح).
     """
     if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
         raise HTTPException(status_code=400, detail="Twilio credentials are not configured yet.")
@@ -107,7 +107,7 @@ def voice_webhook():
     
     return Response(content=str(response), media_type="application/xml")
 
-@app.get("/api/handle-selection")
+@app.post("/api/handle-selection")
 def handle_selection(Digits: str = Form(...)):
     """
     يستقبل رقم الحمولة الذي اختاره حارث عبر الضغط على هاتفه، 
