@@ -30,12 +30,13 @@ RUN apt-get update && apt-get install -y \
     libgbm-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install python packages
+# Copy requirements and install python packages including playwright explicitly
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir playwright
 
 # Install playwright browsers
-RUN playwright install --with-deps
+RUN python -m playwright install --with-deps
 
 # Copy the rest of the project files
 COPY . .
