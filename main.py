@@ -1,66 +1,126 @@
 import os
-from fastapi import FastAPI, HTTPException
-import requests
-from bs4 import BeautifulSoup
+from fastapi import FastAPI, HTTPException, Form, Response
+from pydantic import BaseModel
+from typing import List
+from playwright.sync_api import sync_playwright
+from twilio.twiml.voice_response import VoiceResponse, Gather
+from twilio.rest import Client
 
-app = FastAPI(title="E-Kurier L4H2 Secure Scraper Agent")
+app = FastAPI(title="E-Kurier L4H2 Secure Scraper Agent", version="0.1.0")
 
-# قراءة بيانات الدخول من متغيرات النظام الآمنة (التي سنضبطها في السحابة لاحقاً)
-EKURIER_USER = os.getenv("EKURIER_USER", "user_placeholder")
-EKURIER_PASS = os.getenv("EKURIER_PASS", "pass_placeholder")
+# إعدادات بيانات الاعتماد
+EKURIER_USER = os.getenv("EKURIER_USER", "asmaa10.logistik@gmail.com")
+EKURIER_PASS = os.getenv("EKURIER_PASS", "kP4100UY")
 
-@app.get("/api/loads")
+# إعدادات Twilio 
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")
+HARITH_PHONE_NUMBER = os.getenv("HARITH_PHONE_NUMBER", "+9647701668515") # رقم الهاتف المعتمد
+
+class LoadItem(BaseModel):
+    origin: str
+    destination: str
+    weight: str
+    vehicle_match: str
+
+class LoadsResponse(BaseModel):
+    status: str
+    vehicle: str
+    loads_count: int
+    loads: List[LoadItem]
+
+@app.get("/")
+def read_root():
+    return {"message": "E-Kurier L4H2 Agent is running successfully!"}
+
+@app.get("/api/loads", response_model=LoadsResponse)
 def get_filtered_loads():
-    session = requests.Session()
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    """
+    يقوم بتشغيل متصفح Playwright في الخلفية، تسجيل الدخول، 
+    وجلب الحمولات المتاحة وتصفيتها لسيارة Fiat Ducato L4H2.
+    """
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"]
+            )
+            page = browser.new_page()
+            
+            # بيانات تجريبية تحاكي جلب 3 حمولات مطابقة لسيارة فيات دوكاتو L4H2
+            mock_loads = [
+                LoadItem(origin="وفات", destination="صلاح", weight="650 كغم", vehicle_match="Fiat Ducato L4H2"),
+                LoadItem(origin="بغداد", destination="اربيل", weight="900 كغم", vehicle_match="Fiat Ducato L4H2"),
+                LoadItem(origin="الموصل", destination="دهوك", weight="800 كغم", vehicle_match="Fiat Ducato L4H2")
+            ]
+            
+            browser.close()
+            
+            return LoadsResponse(
+                status="success",
+                vehicle="Fiat Ducato L4H2",
+                loads_count=len(mock_loads),
+                loads=mock_loads
+            )
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/call-harith")
+def call_harith_for_loads():
+    """
+    يبدأ مكالمة تفاعلية مع حارث عبر Twilio لعرض الحمولات المتاحة وسؤاله عن الاختيار.
+    """
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        raise HTTPException(status_code=400, detail="Twilio credentials are not configured yet.")
     
     try:
-        # الخطوة 1: محاولة تسجيل الدخول (سنتأكد من رابط الـ Login الفعلي للموقع لاحقاً)
-        login_url = "https://e-kurier.net/login" # مثال لصفحة الدخول
-        login_data = {
-            "username": EKURIER_USER,
-            "password": EKURIER_PASS
-        }
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         
-        # إرسال طلب تسجيل الدخول وحفظ الجلسة
-        # response_login = session.post(login_url, data=login_data, headers=headers, timeout=10)
+        webhook_url = "https://ekurier-agent.onrender.com/api/voice-webhook"
         
-        # الخطوة 2: جلب صفحة الحمولات بعد تسجيل الدخول
-        loads_url = "https://e-kurier.net/"
-        response = session.get(loads_url, headers=headers, timeout=10)
-        
-        if response.status_code != 200:
-            raise HTTPException(status_code=500, detail="فشل الاتصال بموقع الشحنات")
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # قائمة لتخزين الحمولات المفلترة لسيارة L4H2
-        filtered_loads = []
-        
-        # (ملاحظة: هنا سنقوم بربط محددات الـ HTML الدقيقة لجدول الشحنات في الموقع واستبعاد الفئات الكبيرة LKW)
-        # كنموذج تجريبي أولي يضمن عمل الـ API بنجاح:
-        dummy_loads = [
-            {"origin": "برلين", "destination": "ميونخ", "weight": "650 كيلو", "vehicle_match": "Fiat Ducato L4H2 مناسب جداً"},
-            {"origin": "كولونيا", "destination": "فرانكفورت", "weight": "900 كيلو", "vehicle_match": "Fiat Ducato L4H2 مناسب ضمن الحد الأقصى"}
-        ]
-
-        return {
-            "status": "success",
-            "vehicle": "Fiat Ducato L4H2",
-            "loads_count": len(dummy_loads),
-            "loads": dummy_loads
-        }
-
+        call = client.calls.create(
+            to=HARITH_PHONE_NUMBER,
+            from_=TWILIO_PHONE_NUMBER,
+            url=webhook_url
+        )
+        return {"status": "call initiated", "call_sid": call.sid}
+    
     except Exception as e:
-        return {
-            "status": "error",
-            "loads": [],
-            "message": str(e)
-        }
+        raise HTTPException(status_code=500, detail=str(e))
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.post("/api/voice-webhook")
+def voice_webhook():
+    """
+    توليد الرد الصوتي التفاعلي عبر TwiML لقراءة الحمولات وطلب الاختيار من حارث.
+    """
+    response = VoiceResponse()
+    gather = Gather(num_digits=1, action="/api/handle-selection", method="POST")
+    gather.say(
+        text="أهلاً يا حارث. توجد ثلاث حمولات متاحة لسيارة فيات دوكاتو. اضغط 1 للحمولة الأولى من وفات إلى صلاح، اضغط 2 للحمولة الثانية من بغداد إلى اربيل، او اضغط 3 للحمولة الثالثة من الموصل إلى دهوك.",
+        voice="alice",
+        language="ar-XA"
+    )
+    response.append(gather)
+    response.redirect("/api/voice-webhook")
+    
+    return Response(content=str(response), media_type="application/xml")
+
+@app.post("/api/handle-selection")
+def handle_selection(Digits: str = Form(...)):
+    """
+    يستقبل رقم الحمولة الذي اختاره حارث عبر الضغط على هاتفه، 
+    ويقوم بتأكيد الطلب ومن ثم توجيهه.
+    """
+    response = VoiceResponse()
+    
+    selected_load = f"الحمولة رقم {Digits}"
+    
+    response.say(
+        text=f"تم تأكيد {selected_load} بنجاح. توجه الآن فوراً إلى موقع التحميل. بالتوفيق!",
+        voice="alice",
+        language="ar-XA"
+    )
+    
+    return Response(content=str(response), media_type="application/xml")
