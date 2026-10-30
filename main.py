@@ -107,7 +107,7 @@ def voice_webhook():
     
     return Response(content=str(response), media_type="application/xml")
 
-@app.post("/api/handle-selection")
+@app.get("/api/handle-selection")
 def handle_selection(Digits: str = Form(...)):
     """
     يستقبل رقم الحمولة الذي اختاره حارث عبر الضغط على هاتفه، 
