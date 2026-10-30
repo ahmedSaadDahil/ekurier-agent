@@ -6,7 +6,7 @@ from playwright.sync_api import sync_playwright
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 
-app = FastAPI(title="E-Kurier L4H2 WhatsApp Agent", version="0.2.1")
+app = FastAPI(title="E-Kurier L4H2 WhatsApp Agent", version="0.2.2")
 
 # إعدادات بيانات الاعتماد
 EKURIER_USER = os.getenv("EKURIER_USER", "asmaa10.logistik@gmail.com")
@@ -73,30 +73,39 @@ def send_whatsapp_loads():
     try:
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         
-        message_body = (
-            "🚛 *أهلاً يا حارث - نظام الحمولات المتاحة*\n"
-            "توجد 3 حمولات مطابقة لسيارة فيات دوكاتو L4H2:\n\n"
-            "1️⃣ من (وفات) إلى (صلاح) - الوزن: 650 كغم\n"
-            "2️⃣ من (بغداد) إلى (اربيل) - الوزن: 900 كغم\n"
-            "3️⃣ من (الموصل) إلى (دهوك) - الوزن: 800 كغم\n\n"
-            "👉 *يرجى الرد برقم الحمولة (1 أو 2 أو 3) لاختيارها وتأكيدها فوراً.*"
-        )
+        # محاولة الإرسال باستخدام القالب التجريبي الافتراضي لتجاوز قيود الـ Sandbox
+        try:
+            message = client.messages.create(
+                from_=TWILIO_WHATSAPP_NUMBER,
+                to=HARITH_WHATSAPP_NUMBER,
+                content_sid='HX2b4351ab14e7a2b904df60a67117d84d',
+                content_variables='{"1":"12","2":"3"}'
+            )
+            return {"status": "whatsapp template sent", "message_sid": message.sid}
+        except Exception:
+            # طريقة بديلة في حال تطلب الأمر النص المباشر ضمن جلسة نشطة
+            message = client.messages.create(
+                from_=TWILIO_WHATSAPP_NUMBER,
+                to=HARITH_WHATSAPP_NUMBER,
+                body=(
+                    "🚛 *أهلاً يا حارث - نظام الحمولات المتاحة*\n"
+                    "توجد 3 حمولات مطابقة لسيارة فيات دوكاتو L4H2:\n\n"
+                    "1️⃣ من (وفات) إلى (صلاح) - الوزن: 650 كغم\n"
+                    "2️⃣ من (بغداد) إلى (اربيل) - الوزن: 900 كغم\n"
+                    "3️⃣ من (الموصل) إلى (دهوك) - الوزن: 800 كغم\n\n"
+                    "👉 *يرجى الرد برقم الحمولة (1 أو 2 أو 3) لاختيارها وتأكيدها فوراً.*"
+                )
+            )
+            return {"status": "whatsapp message sent", "message_sid": message.sid}
         
-        # استخدام الطريقة المتوافقة تماماً مع الـ Sandbox وتجنب طلب الـ ContentSid
-        message = client.messages.create(
-            from_=TWILIO_WHATSAPP_NUMBER,
-            to=HARITH_WHATSAPP_NUMBER,
-            body=message_body
-        )
-        
-        return {"status": "whatsapp message sent", "message_sid": message.sid}
-    
     except Exception as t_err:
-        # طباعة الخطأ بالتفصيل البين في حال وجود استثناء من تويلو
         raise HTTPException(status_code=500, detail=f"Twilio Error: {str(t_err)}")
 
 @app.post("/api/whatsapp-webhook")
 def whatsapp_webhook(Body: str = Form(...)):
+    """
+    يستقبل رد حارث عبر الواتساب (رقم الحمولة) ويقوم بتأكيد الطلب وإرسال الرد.
+    """
     response = MessagingResponse()
     selected_option = Body.strip()
     
