@@ -6,7 +6,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-MODEL_NAME = "gemini-2.0-flash"
+MODEL_NAME = "gemini-3.8-flash"
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
