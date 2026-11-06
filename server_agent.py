@@ -1,6 +1,5 @@
 import os
 from flask import Flask, request
-from tensorflow.python.ops.gen_logging_ops import timestamp
 from twilio.twiml.messaging_response import MessagingResponse
 from google import genai
 
@@ -13,15 +12,11 @@ def webhook():
     msg = resp.message()
     
     try:
-        # تهيئة العميل باستخدام مفتاح البيئة
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-        
-        # استدعاء الموديل بالطريقة القياسية
         response = client.models.generate_content(
             model='gemini-1.5-flash',
             contents=incoming_msg
         )
-        
         msg.body(response.text)
     except Exception as e:
         msg.body(f"خطأ تقني: {str(e)[:50]}")
