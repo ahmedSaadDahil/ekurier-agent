@@ -5,39 +5,53 @@ from twilio.twiml.messaging_response import MessagingResponse
 
 app = Flask(__name__)
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    incoming_msg = request.form.get('Body', '').strip()
+# استدعاء مفتاح الـ API والمتغيرات البيئية من إعدادات Render
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+MODEL_NAME = "gemini-2.0-flash"
+
+@app.route("/whatsapp", methods=["POST"])
+def whatsapp_webhook():
+    # استقبال الرسالة القادمة من الواتساب عبر Twilio
+    incoming_msg = request.form.get("Body", "").strip()
     resp = MessagingResponse()
-    msg = resp.message()
-    
-    api_key = os.environ.get("GEMINI_API_KEY")
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={api_key}"
-    
+    reply = resp.message()
+
+    if not incoming_msg:
+        reply.body("أهلاً بك يا أبو شهاب، لم تصلني أي رسالة نصية.")
+        return str(resp)
+
+    if not GEMINI_API_KEY:
+        reply.body("عذراً يا أبو شهاب، مفتاح النظام (API Key) غير مضبوط في السيرفر.")
+        return str(resp)
+
+    # إعداد رابط الطلب لـ Google Gemini API
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GEMINI_API_KEY}"
+    headers = {"Content-Type": "application/json"}
     payload = {
         "contents": [{
             "parts": [{"text": incoming_msg}]
         }]
     }
-    
+
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        res_data = response.json()
+        response = requests.post(url, json=payload, headers=headers, timeout=20)
         
-        if "candidates" in res_data and len(res_data["candidates"]) > 0:
-            ai_reply = res_data['candidates'][0]['content']['parts'][0]['text']
-            msg.body(ai_reply)
-        elif "error" in res_data:
-            err_msg = res_data["error"].get("message", "خطأ من جوجل")
-            msg.body(f"خطأ: {err_msg[:100]}")
+        if response.status_code == 200:
+            data = response.json()
+            # استخراج الرد من استجابة نموذج الذكاء الاصطناعي
+            ai_reply = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            if ai_reply:
+                reply.body(ai_reply)
+            else:
+                reply.body("عذراً يا أبو شهاب، لم أتمكن من صياغة إجابة واضحة.")
         else:
-            msg.body("عذراً، استجابة غير متوقعة.")
+            # معالجة أخطاء الضغط العالي أو حالة السيرفر
+            reply.body("عذراً يا أبو شهاب، حدث خطأ في النظام أو ضغط مؤقت على الخادم.")
             
     except Exception as e:
-        msg.body("عذراً يا أبو شهاب، حدث خطأ في النظام.")
-        
+        reply.body(f"عذراً يا أبو شهاب، حدث خطأ غير متوقع في الاتصال.")
+
     return str(resp)
 
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
