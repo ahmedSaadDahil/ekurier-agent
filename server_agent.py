@@ -5,7 +5,7 @@ from google import genai
 
 app = Flask(__name__)
 
-# تهيئة عميل الذكاء الاصطناعي باستخدام مفتاح API الموجود في متغيرات البيئة
+# تهيئة عميل الذكاء الاصطناعي
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 @app.route('/webhook', methods=['POST'])
@@ -31,5 +31,5 @@ def webhook():
     return str(resp)
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
