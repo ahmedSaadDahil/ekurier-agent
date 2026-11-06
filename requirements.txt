@@ -1,5 +1,5 @@
 flask
 twilio
-google-genai
+google-generativeai
 gunicorn
 requests
