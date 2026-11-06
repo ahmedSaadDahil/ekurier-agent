@@ -2,11 +2,9 @@ import os
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from google import genai
+from google.genai import types
 
 app = Flask(__name__)
-
-# تهيئة عميل الذكاء الاصطناعي
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -18,15 +16,17 @@ def webhook():
     msg = resp.message()
     
     try:
-        # إرسال الرسالة إلى نموذج الذكاء الاصطناعي للحصول على الرد
+        # تهيئة العميل واستدعاء نموذج الذكاء الاصطناعي بالطريقة الآمنة
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=incoming_msg,
+            contents=incoming_msg
         )
         ai_reply = response.text
         msg.body(ai_reply)
     except Exception as e:
-        msg.body("عذراً يا أبو شهاب، حدث خطأ في معالجة طلبك حالياً.")
+        # في حال حدوث أي خطأ، سنرسل تفاصيل الخطأ البسيطة لنعرف السبب فورا
+        msg.body(f"عذراً يا أبو شهاب، حدث خطأ تقني: {str(e)[:50]}")
         
     return str(resp)
 
