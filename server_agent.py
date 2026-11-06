@@ -1,7 +1,7 @@
 import os
+import requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
-from google import genai
 
 app = Flask(__name__)
 
@@ -11,19 +11,24 @@ def webhook():
     resp = MessagingResponse()
     msg = resp.message()
 
+    api_key = os.environ.get("GEMINI_API_KEY")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+
+    payload = {
+        "contents": [{
+            "parts": [{"text": incoming_msg}]
+        }]
+    }
+
     try:
-        # تهيئة العميل بالطريقة الحديثة
-        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        response = requests.post(url, json=payload, timeout=10)
+        res_data = response.json()
 
-        # استدعاء النموذج القياسي المعتمد
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=incoming_msg
-        )
-
-        msg.body(response.text)
+        # استخراج الرد من هيكل بيانات جوجل المباشر
+        ai_reply = res_data['candidates'][0]['content']['parts'][0]['text']
+        msg.body(ai_reply)
     except Exception as e:
-        msg.body(f"خطأ تقني: {str(e)[:50]}")
+        msg.body(f"عذراً يا أبو شهاب، حدث خطأ: {str(e)[:50]}")
 
     return str(resp)
 
