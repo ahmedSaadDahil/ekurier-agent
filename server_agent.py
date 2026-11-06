@@ -12,8 +12,8 @@ def webhook():
     msg = resp.message()
     
     api_key = os.environ.get("GEMINI_API_KEY")
-    # استخدام الإصدار القياسي v1 مع موديل gemini-2.0-flash المعتمد حالياً
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key={api_key}"
+    # استخدام النموذج المحدث والمطلوب رسمياً حسب تنبيه جوجل الأخير
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={api_key}"
     
     payload = {
         "contents": [{
