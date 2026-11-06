@@ -1,7 +1,7 @@
 import os
-import requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
+from google import genai
 
 app = Flask(__name__)
 
@@ -11,31 +11,20 @@ def webhook():
     resp = MessagingResponse()
     msg = resp.message()
     
-    api_key = os.environ.get("GEMINI_API_KEY")
-    # استخدام الموديل الأحدث المخصص للطلبات السريعة والمستقرة
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-lite:generateContent?key={api_key}"
-    
-    payload = {
-        "contents": [{
-            "parts": [{"text": incoming_msg}]
-        }]
-    }
-    
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        res_data = response.json()
+        api_key = os.environ.get("GEMINI_API_KEY")
+        client = genai.Client(api_key=api_key)
         
-        if "candidates" in res_data and len(res_data["candidates"]) > 0:
-            ai_reply = res_data['candidates'][0]['content']['parts'][0]['text']
-            msg.body(ai_reply)
-        elif "error" in res_data:
-            err_msg = res_data["error"].get("message", "خطأ من جوجل")
-            msg.body(f"خطأ: {err_msg[:100]}")
-        else:
-            msg.body("عذراً، استجابة غير متوقعة.")
-            
+        # استخدام الموديل المستقر المعتمد على مفتاحك
+        response = client.models.generate_content(
+            model='gemini-3.7-flash',
+            contents=incoming_msg
+        )
+        
+        msg.body(response.text)
     except Exception as e:
-        msg.body("عذراً يا أبو شهاب، حدث خطأ في النظام.")
+        print("Error:", str(e))
+        msg.body("عذراً يا أبو شهاب، حدث خطأ مؤقت في النظام.")
         
     return str(resp)
 
