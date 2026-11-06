@@ -1,26 +1,27 @@
 import os
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
-from google import genai
+import google.generativeai as genai
 
 app = Flask(__name__)
+
+# تهيئة مفتاح جيميناي بالطريقة المباشرة
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     incoming_msg = request.form.get('Body', '').strip()
     resp = MessagingResponse()
     msg = resp.message()
-    
+
     try:
-        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-        response = client.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=incoming_msg
-        )
+        # إرسال الرسالة والحصول على الرد
+        response = model.generate_content(incoming_msg)
         msg.body(response.text)
     except Exception as e:
         msg.body(f"خطأ تقني: {str(e)[:50]}")
-        
+
     return str(resp)
 
 if __name__ == '__main__':
