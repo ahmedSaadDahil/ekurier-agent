@@ -10,26 +10,23 @@ def webhook():
     incoming_msg = request.form.get('Body', '').strip()
     resp = MessagingResponse()
     msg = resp.message()
-
+    
     api_key = os.environ.get("GEMINI_API_KEY")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-
+    
     payload = {
         "contents": [{
             "parts": [{"text": incoming_msg}]
         }]
     }
-
+    
     try:
         response = requests.post(url, json=payload, timeout=10)
-        res_data = response.json()
-
-        # استخراج الرد من هيكل بيانات جوجل المباشر
-        ai_reply = res_data['candidates'][0]['content']['parts'][0]['text']
-        msg.body(ai_reply)
+        # إرسال الاستجابة كاملة كما ترد من جوجل لنرى تفاصيلها على الواتساب
+        msg.body(response.text[:1500])
     except Exception as e:
-        msg.body(f"عذراً يا أبو شهاب، حدث خطأ: {str(e)[:50]}")
-
+        msg.body(f"خطأ: {str(e)[:50]}")
+        
     return str(resp)
 
 if __name__ == '__main__':
