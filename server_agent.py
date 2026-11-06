@@ -2,31 +2,26 @@ import os
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from google import genai
-from google.genai import types
 
 app = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # استقبال نص الرسالة الواردة من الواتساب
     incoming_msg = request.form.get('Body', '').strip()
-    
-    # إنشاء استجابة Twilio TwiML
     resp = MessagingResponse()
     msg = resp.message()
     
     try:
-        # تهيئة العميل واستدعاء نموذج الذكاء الاصطناعي بالطريقة الآمنة
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        # استخدام الموديل القياسي الموثوق
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-1.5-flash',
             contents=incoming_msg
         )
         ai_reply = response.text
         msg.body(ai_reply)
     except Exception as e:
-        # في حال حدوث أي خطأ، سنرسل تفاصيل الخطأ البسيطة لنعرف السبب فورا
-        msg.body(f"عذراً يا أبو شهاب، حدث خطأ تقني: {str(e)[:50]}")
+        msg.body(f"خطأ: {str(e)[:60]}")
         
     return str(resp)
 
