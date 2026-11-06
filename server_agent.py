@@ -12,7 +12,6 @@ def webhook():
     msg = resp.message()
     
     api_key = os.environ.get("GEMINI_API_KEY")
-    # استخدام موديل gemini-2.0-flash المدعوم حالياً
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
     
     payload = {
@@ -25,11 +24,16 @@ def webhook():
         response = requests.post(url, json=payload, timeout=10)
         res_data = response.json()
         
-        # استخراج الرد الذكي وعرضه على الواتساب
+        # طباعة الرد كاملاً في سجلات Render لنفحصه
+        print("API Response:", res_data)
+        
         ai_reply = res_data['candidates'][0]['content']['parts'][0]['text']
         msg.body(ai_reply)
     except Exception as e:
-        msg.body(f"رد الذكاء الاصطناعي: تم الاتصال بنجاح ولكن حدث استثناء بسيط.")
+        # طباعة الخطأ بالتفصيل في السجلات
+        print("ERROR OCCURRED:", str(e))
+        print("FULL RESPONSE WAS:", res_data if 'res_data' in locals else 'No response')
+        msg.body("عذراً، حدث خطأ داخلي. تم تسجيله في السجلات.")
         
     return str(resp)
 
