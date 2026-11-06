@@ -13,9 +13,9 @@ def webhook():
     
     try:
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-        # استخدام الموديل القياسي الموثوق
+        # استخدام اسم النموذج المدعوم مباشرة
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.0-flash',
             contents=incoming_msg
         )
         ai_reply = response.text
