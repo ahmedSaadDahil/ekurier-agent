@@ -1,0 +1,74 @@
+{
+    "cookies": [
+        {
+            "name": "remember_web_59ba36addc2b2f9401580f83a216260a",
+            "value": "eyJpdiI6ImRZVE5NSmF3ZFdGRmorRURDZjFpVnc9PSIsInZhbHVlIjoiUkdocmFXbTdVZ0thNk0xVGxlTlpDU0ZTYzZCMUpTZTZPS1NQTTNGT2JrdEVGRlhyUjZQTmhFRDF2VllmS2ljeVN1a3dLRjE3L0tpT2VhV0VjVHJSNlJ4dzdlRDk5MnpjTkpxNmRoVUJLWlBucUtiWWloaC92UXF4ZXVPb3h2YzE4ZmE2QjNlcS85d1VUY3FTREVFdTZ5cVRvZ1hiTFc3bG9UZEpERzhibEZmV3NyZUs1MnRqc1RyTCtkeW1yMENrOFVsUXdvVlBKcUdYVFRrZ01QR0M4SUNlN0kvbm5hdjZLNy92UlE5SGtzWWZpYmZhMkQrZGdLUVFjUEFBUTZvNGdOeXgwUVh2WXNVYVdjc3ZqMXdhdEE9PSIsIm1hYyI6ImNmZmY2NTg1YjM0NjE4MmM4MjZmNzczZDY3ZGM5MWVmODJkMTNiMDk3ZGM4NTExZmI0MmVlMGU0ZjQ0MTAwZGQiLCJ0YWciOiIifQ%3D%3D",
+            "domain": "e-kurier.net",
+            "path": "/",
+            "expires": -1,
+            "httpOnly": true,
+            "secure": true,
+            "sameSite": "Lax"
+        },
+        {
+            "name": "cc_cookie",
+            "value": "%7B%22categories%22%3A%5B%22necessary%22%2C%22analytics%22%2C%22marketing%22%5D%2C%22revision%22%3A0%2C%22data%22%3Anull%2C%22consentTimestamp%22%3A%222026-10-31T07%3A34%3A23.959Z%22%2C%22consentId%22%3A%227a77dcba-5ece-4983-a1a8-3d5af83c2df4%22%2C%22services%22%3A%7B%22necessary%22%3A%5B%5D%2C%22analytics%22%3A%5B%5D%2C%22marketing%22%3A%5B%5D%7D%2C%22languageCode%22%3A%22en%22%2C%22lastConsentTimestamp%22%3A%222026-10-31T07%3A34%3A23.959Z%22%2C%22expirationTime%22%3A1809156863961%7D",
+            "domain": ".e-kurier.net",
+            "path": "/",
+            "expires": 1809156863,
+            "httpOnly": false,
+            "secure": true,
+            "sameSite": "Lax"
+        },
+        {
+            "name": "_ga",
+            "value": "GA1.1.1738566981.1793432065",
+            "domain": ".e-kurier.net",
+            "path": "/",
+            "expires": 1827992064.89431,
+            "httpOnly": false,
+            "secure": false,
+            "sameSite": "Lax"
+        },
+        {
+            "name": "remember_web_59ba36addc2b2f9401580f014c7f58ea4e30989d",
+            "value": "eyJpdiI6IjV4SFQ4cHp3Y05jbjJLR0VVdnR2elE9PSIsInZhbHVlIjoiZDNzM1F5SGhHY1hrbVJZWWJUTHI4dktpY3FLVzFIb3p4NzBCRXVoZERGMTZMQXhOeWFiV0x6TjBGWlpkL0hzMUtIMmJHZFJJalVVRHJiS0h4YWRTd2hOK3hJUHhTVjJCWG5IeFdacXdNYlZrQVlFeUliajQya3FIV29jNkU1cFlSVC9MZVdvOHMrQmZOOFVrWGVENWd2M09rdkpGV1JLVUpUQXIram5HRFRaQ1d3aUx0RndZNllEWktMZklDazB6VjBDSlM2dkgvcUc1ZkJOdlVUMFRZQ3IxaXNCUCtNdkwyTCtzWDRnWFd2OHZDUlFOMG43SnQySlArc3VBWkF3eXQvS21kMXVIUjY0TytnRlVEY1BXV0E9PSIsIm1hYyI6IjdlMGU5YTgzYzViMDAxYmQwZjg0YzQwZjc3MmVhYjEyYzRiNzVkZmQzZGQ3MWNjYzhmYzMyNTQ3Y2M4MDFiNDIiLCJ0YWciOiIifQ%3D%3D",
+            "domain": "e-kurier.net",
+            "path": "/",
+            "expires": 1827992087.79741,
+            "httpOnly": true,
+            "secure": true,
+            "sameSite": "None"
+        },
+        {
+            "name": "XSRF-TOKEN",
+            "value": "eyJpdiI6ImFyZ3VRZTRHblNSMUlHSFcxMUtRaHc9PSIsInZhbHVlIjoiNWJvRmlVU3RqUkdUMG54bU1VcUM4bWdVUlU5UEJRbDh5YjlCUWYycXBscldpWVVvVENhd1duUnc0RWtuRWUxMVdrc20vbWVBT3VxWkpTVCtKQy9UVWE1dVNoZERiU0F3WTAvM2JzakI2RCtuSFJvZHJXb3hjQzFLUU4xVXo0cXAiLCJtYWMiOiJhZDhhODRiNjFjNmQ2NzNhNzcwNjYxNDU2N2RiMzgwZjA3ZjliZGNlZmE5MDIwYjNhMzA0MTJiZTA3ODk3ZTI3IiwidGFnIjoiIn0%3D",
+            "domain": "e-kurier.net",
+            "path": "/",
+            "expires": 1793439288.66697,
+            "httpOnly": false,
+            "secure": true,
+            "sameSite": "None"
+        },
+        {
+            "name": "laravel_session",
+            "value": "eyJpdiI6InB5Tk11MVFDbjJQaEdaQ3JOWFd0a2c9PSIsInZhbHVlIjoiRXhlK3BVcVkyVWdHZmJOTWtUbnRVWmUyQ0F1T0dVNmZvTjlyUmU2RzhJWU05dlZNMGJHRmRlVDlkRHpyakhLcVJNRFlWdGZ2U2VMaHZEWTE2dzNVK0IwSzJkUGdWYk16TGh3d3RscVgxL1Q0aG5RMy9YWHpQUEYyaitTb0o3ZFgiLCJtYWMiOiI0ZWM2YmZjMTE3Yjg3Yzc0MjRkYzE4MjYxOWM1NmU0ZDljNDQyMDIyMjljZDJkODFkMjU5MGQ4ZGJhNWFmOTZjIiwidGFnIjoiIn0%3D",
+            "domain": "e-kurier.net",
+            "path": "/",
+            "expires": 1793439288.667438,
+            "httpOnly": true,
+            "secure": true,
+            "sameSite": "None"
+        },
+        {
+            "name": "_ga_GWPP3DKMTY",
+            "value": "GS2.1.s1793432064$o1$g1$t1793432088$j36$l0$h0",
+            "domain": ".e-kurier.net",
+            "path": "/",
+            "expires": 1827992088.700964,
+            "httpOnly": false,
+            "secure": false,
+            "sameSite": "Lax"
+        }
+    ]
+}
