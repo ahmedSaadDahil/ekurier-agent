@@ -12,7 +12,8 @@ def webhook():
     msg = resp.message()
     
     api_key = os.environ.get("GEMINI_API_KEY")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    # استخدام الإصدار القياسي v1 مع موديل gemini-2.0-flash المعتمد حالياً
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key={api_key}"
     
     payload = {
         "contents": [{
@@ -24,21 +25,16 @@ def webhook():
         response = requests.post(url, json=payload, timeout=10)
         res_data = response.json()
         
-        # طباعة الرد الخام في سجلات Render لنرى محتواه بدقة
-        print("API Response JSON:", res_data)
-        
         if "candidates" in res_data and len(res_data["candidates"]) > 0:
             ai_reply = res_data['candidates'][0]['content']['parts'][0]['text']
             msg.body(ai_reply)
         elif "error" in res_data:
-            err_msg = res_data["error"].get("message", "خطأ غير معروف من جوجل")
-            print("Google API Error:", err_msg)
-            msg.body(f"خطأ من جوجل: {err_msg[:100]}")
+            err_msg = res_data["error"].get("message", "خطأ من جوجل")
+            msg.body(f"خطأ: {err_msg[:100]}")
         else:
-            msg.body("عذراً، استجابة غير متوقعة من خوادم الذكاء الاصطناعي.")
+            msg.body("عذراً، استجابة غير متوقعة.")
             
     except Exception as e:
-        print("Exception Error:", str(e))
         msg.body("عذراً يا أبو شهاب، حدث خطأ في النظام.")
         
     return str(resp)
