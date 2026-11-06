@@ -6,7 +6,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-MODEL_NAME = "gemini-1.5-flash"
+MODEL_NAME = "gemini-3.8-flash"
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
@@ -15,14 +15,14 @@ def whatsapp_webhook():
     reply = resp.message()
 
     if not incoming_msg:
-        reply.body("أهلاً بك يا أبو شهاب")
+        reply.body("أهلاً بك يا أبو شهاب، أرسل رسالتك وسأرد.")
         return str(resp)
 
     if not GEMINI_API_KEY:
-        reply.body("مفتاح الـ API غير موجود")
+        reply.body("عذراً يا أبو شهاب، مفتاح الـ API غير مضبوط في إعدادات Render.")
         return str(resp)
 
-    # استخدام النسخة القياسية المستقرة لتجنب أي مشاكل في الموديلات الجديدة
+    # استخدام نفس المسار القديم تماماً والمستقر بدون أي تغييرات
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GEMINI_API_KEY}"
     headers = {"Content-Type": "application/json"}
     payload = {
@@ -32,24 +32,22 @@ def whatsapp_webhook():
     }
 
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
-        print("Google API Status Code:", response.status_code)
-        print("Google API Response:", response.text)
+        response = requests.post(url, json=payload, headers=headers, timeout=25)
         
         if response.status_code == 200:
             data = response.json()
             candidates = data.get("candidates", [])
             if candidates:
                 ai_reply = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                reply.body(ai_reply if ai_reply else "عذراً، لم أتمكن من صياغة الإجابة.")
+                reply.body(ai_reply if ai_reply else "عذراً يا أبو شهاب، لم أتمكن من صياغة الإجابة.")
             else:
                 reply.body("عذراً، لم تصدر أي إجابة من النموذج.")
         else:
-            reply.body(f"خطأ من الخادم: {response.status_code}")
+            error_details = response.json().get("error", {}).get("message", "خطأ غير معروف")
+            reply.body(f"خطأ من جوجل: {error_details}")
             
     except Exception as e:
-        print("Error connecting to Gemini:", str(e))
-        reply.body("حدث خطأ في الاتصال بالذكاء الاصطناعي.")
+        reply.body("عذراً يا أبو شهاب، حدث خطأ في الاتصال بالخادم.")
 
     return str(resp)
 
