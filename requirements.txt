@@ -1,5 +1,4 @@
 flask
 twilio
-google-genai
-gunicorn
 requests
+gunicorn
