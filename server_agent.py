@@ -6,7 +6,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-MODEL_NAME = "gemini-2.0-flash"
+MODEL_NAME = "gemini-3.8-flash"
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
@@ -22,6 +22,7 @@ def whatsapp_webhook():
         reply.body("مفتاح الـ API غير موجود")
         return str(resp)
 
+    # استخدام المسار القياسي الصحيح مع النموذج الجديد المطلق من جوجل
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GEMINI_API_KEY}"
     headers = {"Content-Type": "application/json"}
     payload = {
@@ -31,7 +32,7 @@ def whatsapp_webhook():
     }
 
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=20)
+        response = requests.post(url, json=payload, headers=headers, timeout=25)
         
         if response.status_code == 200:
             data = response.json()
@@ -43,7 +44,7 @@ def whatsapp_webhook():
                 reply.body("عذراً، لم تصدر أي إجابة من النموذج.")
         else:
             error_details = response.json().get("error", {}).get("message", "خطأ في الاتصال")
-            reply.body(f"خطأ: {error_details}")
+            reply.body(f"خطأ من جوجل: {error_details}")
             
     except Exception as e:
         reply.body("حدث خطأ في النظام.")
