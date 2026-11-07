@@ -1,12 +1,11 @@
 import os
-import requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
+from google import genai
 
 app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-MODEL_NAME = "gemini-3.8-flash"
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
@@ -19,32 +18,21 @@ def whatsapp_webhook():
         return str(resp)
 
     if not GEMINI_API_KEY:
-        reply.body("مفتاح الـ API غير موجود")
+        reply.body("مفتاح الـ API غير مضبوط")
         return str(resp)
 
-    # استخدام المسار القياسي الصحيح مع النموذج الجديد المطلق من جوجل
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GEMINI_API_KEY}"
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "contents": [{
-            "parts": [{"text": incoming_msg}]
-        }]
-    }
-
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=25)
+        # استخدام الحزمة والموديل الرسمي الموثق في جوجل
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        response = client.interactions.create(
+            model="gemini-3.8-flash",
+            input=incoming_msg
+        )
         
-        if response.status_code == 200:
-            data = response.json()
-            candidates = data.get("candidates", [])
-            if candidates:
-                ai_reply = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                reply.body(ai_reply if ai_reply else "عذراً، لم أتمكن من صياغة الإجابة.")
-            else:
-                reply.body("عذراً، لم تصدر أي إجابة من النموذج.")
+        if response and response.output_text:
+            reply.body(response.output_text)
         else:
-            error_details = response.json().get("error", {}).get("message", "خطأ في الاتصال")
-            reply.body(f"خطأ من جوجل: {error_details}")
+            reply.body("عذراً، لم أتمكن من صياغة الإجابة.")
             
     except Exception as e:
         reply.body("حدث خطأ في النظام.")
