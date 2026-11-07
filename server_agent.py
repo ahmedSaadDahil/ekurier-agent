@@ -22,20 +22,21 @@ def whatsapp_webhook():
         return str(resp)
 
     try:
-        # استخدام الحزمة والموديل الرسمي الموثق في جوجل
+        # استخدام العميل والطريقة القياسية المباشرة لتوليد المحتوى بالحزمة الجديدة
         client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.interactions.create(
+        response = client.models.generate_content(
             model="gemini-3.8-flash",
-            input=incoming_msg
+            contents=incoming_msg,
         )
         
-        if response and response.output_text:
-            reply.body(response.output_text)
+        if response and response.text:
+            reply.body(response.text)
         else:
-            reply.body("عذراً، لم أتمكن من صياغة الإجابة.")
+            reply.body("عذراً يا أبو شهاب، لم أتمكن من صياغة الإجابة.")
             
     except Exception as e:
-        reply.body("حدث خطأ في النظام.")
+        print(f"Error occurred: {str(e)}")
+        reply.body("حدث خطأ في الاتصال بالنموذج.")
 
     return str(resp)
 
