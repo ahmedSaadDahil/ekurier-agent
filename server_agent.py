@@ -60,27 +60,12 @@ def whatsapp_webhook():
 
     return str(resp)
 
-# مسار استقبال وتحديث الكوكيز من تطبيق حارث (WebView)
-@app.route("/api/update-cookies", methods=["POST"])
-def update_cookies():
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"status": "error", "message": "No data received"}), 400
-        
-        with open("session.json", "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-            
-        print("✅ تم تحديث وحفظ جلسة الكوكيز بنجاح عبر التطبيق!")
-        return jsonify({"status": "success", "message": "تم تحديث وحفظ الجلسة بنجاح"}), 200
-    except Exception as e:
-        print(f"❌ Error updating cookies: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-# مسار جلب الحمولات الصافي (الذي كان يعمل بنجاح تام وبدون أي تعقيد)
+# مسار ديناميكي لجلب الحمولات الحية وتصفيتها حسب موقع حارث الجغرافي
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     try:
+        hareth_city = request.args.get("city", "").strip().lower()
+
         url = "https://e-kurier.net/portal/freights"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -89,25 +74,17 @@ def get_live_hareth_loads():
             "Referer": "https://e-kurier.net/portal/dashboard"
         }
 
+        # تحميل الكوكيز النشطة لجلسة الموقع
         cookies = {}
         if os.path.exists("session.json"):
             try:
                 with open("session.json", "r", encoding="utf-8") as f:
                     session_data = json.load(f)
-                    
-                    cookie_list = []
-                    if isinstance(session_data, list):
-                        cookie_list = session_data
-                    elif isinstance(session_data, dict) and "cookies" in session_data:
-                        cookie_list = session_data["cookies"]
-
-                    for cookie in cookie_list:
-                        if isinstance(cookie, dict) and "name" in cookie and "value" in cookie:
+                    if "cookies" in session_data:
+                        for cookie in session_data["cookies"]:
                             cookies[cookie["name"]] = cookie["value"]
-                            
-                print(f"✅ تم تحميل {len(cookies)} كوكي بنجاح من session.json")
             except Exception as e:
-                print(f"❌ Cookie error: {e}")
+                print(f"Cookie load error: {e}")
 
         all_scraped_loads = []
         max_pages = 3 
@@ -116,45 +93,26 @@ def get_live_hareth_loads():
             for page_num in range(1, max_pages + 1):
                 target_url = f"{url}?page={page_num}"
                 response = client.get(target_url)
-                
                 if response.status_code == 200:
                     soup = BeautifulSoup(response.text, 'html.parser')
-                    cards = soup.find_all(['article', 'tr', 'div'], class_=lambda x: x and ('freight' in x.lower() or 'load' in x.lower() or 'item' in x.lower() or 'card' in x.lower()))
+                    cards = soup.find_all('article')
                     if not cards:
-                        cards = soup.find_all(['article', 'tr'])
+                        cards = soup.select('div[class*="freight"], tr')
 
                     for card in cards:
                         text = card.get_text(separator='\n', strip=True)
-                        if len(text) > 30 and ('DE ' in text or 'Loading' in text or 'km' in text or 'Unloading' in text):
+                        if len(text) > 40 and ('Loading:' in text or 'Distance' in text or 'Colli' in text):
                             lines = [line.strip() for line in text.split('\n') if line.strip()]
-                            if lines and lines not in all_scraped_loads:
+                            if lines not in all_scraped_loads:
                                 all_scraped_loads.append(lines)
 
+        # هيكلة وتصفية الحمولات الحية
         formatted_loads = []
-        seen_routes = set()
-
         for idx, lines in enumerate(all_scraped_loads, start=1):
-            origin = "غير محدد"
-            destination = "غير محدد"
+            origin = lines[0] if len(lines) > 0 else "غير محدد"
+            destination = lines[1] if len(lines) > 1 else "غير محدد"
             
-            for i, line in enumerate(lines):
-                if "DE " in line or "Loading" in line or "From" in line:
-                    origin = line
-                    if i + 1 < len(lines):
-                        destination = lines[i + 1]
-                    break
-            
-            if origin == "غير محدد" and len(lines) > 0:
-                origin = lines[0]
-            if destination == "غير محدد" and len(lines) > 1:
-                destination = lines[1]
-
-            route_key = f"{origin}-{destination}"
-            if route_key in seen_routes:
-                continue
-            seen_routes.add(route_key)
-
-            distance_km = 150.0
+            distance_km = 300.0
             for line in lines:
                 if "km" in line.lower() or "كم" in line:
                     nums = re.findall(r'\d+', line)
@@ -162,10 +120,13 @@ def get_live_hareth_loads():
                         distance_km = float(nums[0])
                         break
 
+            if hareth_city and hareth_city not in origin.lower():
+                continue
+
             floor_price = round(distance_km * 1.3 * 1.2, 2)
 
             formatted_loads.append({
-                "id": len(formatted_loads) + 1,
+                "id": idx,
                 "origin": origin,
                 "destination": destination,
                 "weight": "1200 كغ (Fiat Ducato)",
@@ -187,7 +148,7 @@ def get_live_hareth_loads():
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Clean Stable Agent is active!"})
+    return jsonify({"status": "online", "message": "E-Kurier Live Scraper & Filter Agent is active!"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
