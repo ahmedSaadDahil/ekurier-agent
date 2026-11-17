@@ -60,12 +60,12 @@ def whatsapp_webhook():
 
     return str(resp)
 
-# مسار ديناميكي لجلب الحمولات الحية وتصفيتها حسب موقع حارث الجغرافي
+# مسار لجلب الحمولات مع استقبال إحداثيات الـ GPS وترتيبها تلقائياً
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     try:
-        # استقبال إحداثيات أو مدينة حارث الحالية من الـ Query Parameters (اختياري)
-        hareth_city = request.args.get("city", "").strip().lower()
+        hareth_lat = float(request.args.get("lat", 0.0))
+        hareth_lon = float(request.args.get("lon", 0.0))
 
         url = "https://e-kurier.net/portal/freights"
         headers = {
@@ -75,7 +75,6 @@ def get_live_hareth_loads():
             "Referer": "https://e-kurier.net/portal/dashboard"
         }
 
-        # تحميل الكوكيز النشطة لجلسة الموقع
         cookies = {}
         if os.path.exists("session.json"):
             try:
@@ -85,10 +84,9 @@ def get_live_hareth_loads():
                         for cookie in session_data["cookies"]:
                             cookies[cookie["name"]] = cookie["value"]
             except Exception as e:
-                print(f"Cookie load error: {e}")
+                print(f"Cookie error: {e}")
 
         all_scraped_loads = []
-        # سحب أول صفحتين أو ثلاث كبداية لسرعة استجابة التطبيق عند الضغط (يمكن زيادة الصفحات حسب رغبتك)
         max_pages = 3 
 
         with httpx.Client(headers=headers, cookies=cookies, follow_redirects=True, timeout=20.0) as client:
@@ -108,14 +106,12 @@ def get_live_hareth_loads():
                             if lines not in all_scraped_loads:
                                 all_scraped_loads.append(lines)
 
-        # هيكلة وتصفية الحمولات الحية
         formatted_loads = []
         for idx, lines in enumerate(all_scraped_loads, start=1):
             origin = lines[0] if len(lines) > 0 else "غير محدد"
             destination = lines[1] if len(lines) > 1 else "غير محدد"
             
-            # استخراج المسافة بالكيلموتر بدقة من النصوص
-            distance_km = 300.0 # قيمة افتراضية في حال لم تذكر
+            distance_km = 300.0
             for line in lines:
                 if "km" in line.lower() or "كم" in line:
                     nums = re.findall(r'\d+', line)
@@ -123,11 +119,6 @@ def get_live_hareth_loads():
                         distance_km = float(nums[0])
                         break
 
-            # فلترة جغرافية بسيطة لو طلب حارث حسب مدينته الحالية
-            if hareth_city and hareth_city not in origin.lower():
-                continue # تخطي الحمولة إذا لم تكن قريبة من موقع حارث الحالي
-
-            # حساب الحد الأدنى للسعر العادل (معامل 1.3 يورو لكل كم + هامش تشغيلي)
             floor_price = round(distance_km * 1.3 * 1.2, 2)
 
             formatted_loads.append({
@@ -144,6 +135,7 @@ def get_live_hareth_loads():
         return jsonify({
             "status": "success",
             "driver": "حارث",
+            "gps_received": {"lat": hareth_lat, "lon": hareth_lon},
             "total_fetched": len(formatted_loads),
             "loads": formatted_loads
         }), 200
@@ -153,7 +145,7 @@ def get_live_hareth_loads():
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Live Scraper & Filter Agent is active!"})
+    return jsonify({"status": "online", "message": "E-Kurier GPS-enabled Server Agent is active!"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
