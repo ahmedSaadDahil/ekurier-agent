@@ -64,14 +64,34 @@ def whatsapp_webhook():
 
     return str(resp)
 
-# مسار لجلب الحمولات الحقيقية مع استقبال إحداثيات الـ GPS وتخزينها في سجل المسار التاريخي
+# مسار جديد لاستقبال وتحديث الكوكيز تلقائياً من تطبيق حارث
+@app.route("/api/update-cookies", methods=["POST"])
+def update_cookies():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "message": "No data received"}), 400
+        
+        # حفظ الكوكيز المرسلة في ملف session.json
+        with open("session.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+            
+        print("✅ تم تحديث ملف session.json بنجاح عبر التطبيق!")
+        return jsonify({
+            "status": "success",
+            "message": "تم تحديث وحفظ الجلسة بنجاح"
+        }), 200
+    except Exception as e:
+        print(f"❌ Error updating cookies: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# مسار لجلب الحمولات الحقيقية مع استقبال إحداثيات الـ GPS وتخزينها في سجل المسار
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     try:
         hareth_lat = float(request.args.get("lat", 0.0))
         hareth_lon = float(request.args.get("lon", 0.0))
 
-        # تسجيل الموقع في السجل التاريخي لحارث إذا كانت الإحداثيات صالحة
         if hareth_lat != 0.0 and hareth_lon != 0.0:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             new_point = {"lat": hareth_lat, "lon": hareth_lon, "time": timestamp}
@@ -123,19 +143,15 @@ def get_live_hareth_loads():
             for page_num in range(1, max_pages + 1):
                 target_url = f"{url}?page={page_num}"
                 response = client.get(target_url)
-                print(f"Page {page_num} response status: {response.status_code}")
                 
                 if response.status_code == 200:
                     soup = BeautifulSoup(response.text, 'html.parser')
-                    
-                    # استخراج البطاقات أو الصفوف الحقيقية للحمولات من الموقع
                     cards = soup.find_all(['article', 'tr', 'div'], class_=lambda x: x and ('freight' in x.lower() or 'load' in x.lower() or 'item' in x.lower() or 'card' in x.lower()))
                     if not cards:
                         cards = soup.find_all(['article', 'tr'])
 
                     for card in cards:
                         text = card.get_text(separator='\n', strip=True)
-                        # شروط دقيقة لالتقاط الحمولات الحقيقية التي تحتوي على رموز بريدية أو مدن أو مسافات
                         if len(text) > 30 and ('DE ' in text or 'Loading' in text or 'km' in text or 'Unloading' in text):
                             lines = [line.strip() for line in text.split('\n') if line.strip()]
                             if lines and lines not in all_scraped_loads:
@@ -216,7 +232,7 @@ def clear_tracking_history():
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Real Loads Scraper is active!"})
+    return jsonify({"status": "online", "message": "E-Kurier Real Loads & Cookie Sync Server is active!"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
