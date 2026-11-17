@@ -1,17 +1,21 @@
-import os
+from datetime import datetime
 import json
-import httpx
-from bs4 import BeautifulSoup
+import os
 import re
-from flask import Flask, request, jsonify
-from twilio.twiml.messaging_response import MessagingResponse
+from bs4 import BeautifulSoup
+from flask import Flask, jsonify, request
 from google import genai
 from google.genai import types
+import httpx
+from twilio.twiml.messaging_response import MessagingResponse
 
 app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 HARETH_WHATSAPP_NUMBER = "whatsapp:+4917656970147"
+
+# قائمة لتخزين سجل مسار حارث بالكامل مع الوقت
+hareth_tracking_history = []
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
@@ -60,12 +64,31 @@ def whatsapp_webhook():
 
     return str(resp)
 
-# مسار لجلب الحمولات مع استقبال إحداثيات الـ GPS وترتيبها تلقائياً
+# مسار لجلب الحمولات مع استقبال إحداثيات الـ GPS وتخزينها في سجل المسار التاريخي
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     try:
         hareth_lat = float(request.args.get("lat", 0.0))
         hareth_lon = float(request.args.get("lon", 0.0))
+
+        # تسجيل الموقع في السجل التاريخي لحارث إذا كانت الإحداثيات صالحة
+        if hareth_lat != 0.0 and hareth_lon != 0.0:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            new_point = {"lat": hareth_lat, "lon": hareth_lon, "time": timestamp}
+            
+            # منع تكرار حفظ نفس النقطة تماماً وراء بعض
+            if not hareth_tracking_history or (
+                hareth_tracking_history[-1]["lat"] != hareth_lat
+                or hareth_tracking_history[-1]["lon"] != hareth_lon
+            ):
+                hareth_tracking_history.append(new_point)
+
+        # آخر موقع تم تسجيله
+        latest_gps = (
+            hareth_tracking_history[-1]
+            if hareth_tracking_history
+            else {"lat": hareth_lat, "lon": hareth_lon, "time": ""}
+        )
 
         url = "https://e-kurier.net/portal/freights"
         headers = {
@@ -135,7 +158,8 @@ def get_live_hareth_loads():
         return jsonify({
             "status": "success",
             "driver": "حارث",
-            "gps_received": {"lat": hareth_lat, "lon": hareth_lon},
+            "gps_received": latest_gps,
+            "history_count": len(hareth_tracking_history),
             "total_fetched": len(formatted_loads),
             "loads": formatted_loads
         }), 200
@@ -143,9 +167,27 @@ def get_live_hareth_loads():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# مسار جديد لجلب سجل مسار حارث بالكامل
+@app.route("/api/track/history", methods=["GET"])
+def get_tracking_history():
+    return jsonify({
+        "status": "success",
+        "history": hareth_tracking_history
+    }), 200
+
+# مسار جديد لمسح سجل المسار القديم
+@app.route("/api/track/clear", methods=["POST"])
+def clear_tracking_history():
+    global hareth_tracking_history
+    hareth_tracking_history = []
+    return jsonify({
+        "status": "success",
+        "message": "تم مسح سجل المسار بنجاح"
+    }), 200
+
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier GPS-enabled Server Agent is active!"})
+    return jsonify({"status": "online", "message": "E-Kurier GPS-enabled Server Agent with Tracking History is active!"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
