@@ -60,7 +60,58 @@ def whatsapp_webhook():
 
     return str(resp)
 
-# مسار ديناميكي لجلب الحمولات الحية وتصفيتها حسب موقع حارث الجغرافي
+# دالة تسجيل الدخول التلقائي في حال انقطاع الجلسة
+def auto_login_and_get_cookies():
+    username = os.environ.get("EKURIER_USER")
+    password = os.environ.get("EKURIER_PASS")
+    
+    if not username or not password:
+        print("⚠️ متغيرات تسجيل الدخول غير متوفرة في البيئة.")
+        return {}
+
+    login_url = "https://e-kurier.net/portal/login"
+    
+    client = httpx.Client(follow_redirects=True, timeout=20.0)
+    try:
+        # جلب صفحة الدخول لأخذ الكوكيز الأولية والتوكنز إن وجدت
+        resp = client.get(login_url)
+        
+        # إرسال بيانات الاعتماد
+        login_data = {
+            "email": username,
+            "password": password
+        }
+        post_resp = client.post(login_url, data=login_data)
+        
+        if post_resp.status_code == 200:
+            cookies_dict = {name: value for name, value in client.cookies.items()}
+            if cookies_dict:
+                print("✅ تم تسجيل الدخول تلقائياً وجلب كوكيز جديدة بنجاح!")
+                # حفظها في session.json للاستخدام اللاحق
+                session_data = {"cookies": [{"name": k, "value": v} for k, v in cookies_dict.items()]}
+                with open("session.json", "w", encoding="utf-8") as f:
+                    json.dump(session_data, f)
+                return cookies_dict
+    except Exception as e:
+        print(f"Auto-login error: {e}")
+    
+    return {}
+
+# مسار لتحديث الكوكيز يدوياً عبر التطبيق أيضاً
+@app.route("/api/update-cookies", methods=["POST"])
+def update_cookies():
+    try:
+        cookies_data = request.json
+        if cookies_data:
+            with open("session.json", "w", encoding="utf-8") as f:
+                json.dump({"cookies": cookies_data}, f, ensure_ascii=False, indent=4)
+            print("✅ تم تحديث وحفظ جلسة الكوكيز بنجاح عبر التطبيق!")
+            return jsonify({"status": "success", "message": "Cookies updated successfully"}), 200
+        return jsonify({"status": "error", "message": "Empty cookies data"}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# مسار ديناميكي لجلب الحمولات الحية وتصفيتها
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     try:
@@ -93,62 +144,4 @@ def get_live_hareth_loads():
             for page_num in range(1, max_pages + 1):
                 target_url = f"{url}?page={page_num}"
                 response = client.get(target_url)
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    cards = soup.find_all('article')
-                    if not cards:
-                        cards = soup.select('div[class*="freight"], tr')
-
-                    for card in cards:
-                        text = card.get_text(separator='\n', strip=True)
-                        if len(text) > 40 and ('Loading:' in text or 'Distance' in text or 'Colli' in text):
-                            lines = [line.strip() for line in text.split('\n') if line.strip()]
-                            if lines not in all_scraped_loads:
-                                all_scraped_loads.append(lines)
-
-        # هيكلة وتصفية الحمولات الحية
-        formatted_loads = []
-        for idx, lines in enumerate(all_scraped_loads, start=1):
-            origin = lines[0] if len(lines) > 0 else "غير محدد"
-            destination = lines[1] if len(lines) > 1 else "غير محدد"
-            
-            distance_km = 300.0
-            for line in lines:
-                if "km" in line.lower() or "كم" in line:
-                    nums = re.findall(r'\d+', line)
-                    if nums:
-                        distance_km = float(nums[0])
-                        break
-
-            if hareth_city and hareth_city not in origin.lower():
-                continue
-
-            floor_price = round(distance_km * 1.3 * 1.2, 2)
-
-            formatted_loads.append({
-                "id": idx,
-                "origin": origin,
-                "destination": destination,
-                "weight": "1200 كغ (Fiat Ducato)",
-                "distance_km": distance_km,
-                "floor_price": floor_price,
-                "vehicle_match": "Fiat Ducato L4H2",
-                "raw_lines": lines
-            })
-
-        return jsonify({
-            "status": "success",
-            "driver": "حارث",
-            "total_fetched": len(formatted_loads),
-            "loads": formatted_loads
-        }), 200
-
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route("/", methods=["GET"])
-def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Live Scraper & Filter Agent is active!"})
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+                
