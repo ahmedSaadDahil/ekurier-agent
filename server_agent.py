@@ -103,11 +103,23 @@ def get_live_hareth_loads():
             try:
                 with open("session.json", "r", encoding="utf-8") as f:
                     session_data = json.load(f)
-                    if "cookies" in session_data:
-                        for cookie in session_data["cookies"]:
+                    
+                    # قراءة الكوكيز بمرونة سواء كانت قائمة مباشرة أو داخل قاموس
+                    cookie_list = []
+                    if isinstance(session_data, list):
+                        cookie_list = session_data
+                    elif isinstance(session_data, dict) and "cookies" in session_data:
+                        cookie_list = session_data["cookies"]
+
+                    for cookie in cookie_list:
+                        if isinstance(cookie, dict) and "name" in cookie and "value" in cookie:
                             cookies[cookie["name"]] = cookie["value"]
+                            
+                print(f"✅ تم تحميل {len(cookies)} كوكي بنجاح من session.json")
             except Exception as e:
-                print(f"Cookie error: {e}")
+                print(f"❌ Cookie error: {e}")
+        else:
+            print("⚠️ تنبيه: ملف session.json غير موجود على السيرفر!")
 
         all_scraped_loads = []
         max_pages = 3 
@@ -116,6 +128,8 @@ def get_live_hareth_loads():
             for page_num in range(1, max_pages + 1):
                 target_url = f"{url}?page={page_num}"
                 response = client.get(target_url)
+                print(f"Page {page_num} response status: {response.status_code}")
+                
                 if response.status_code == 200:
                     soup = BeautifulSoup(response.text, 'html.parser')
                     cards = soup.find_all('article')
@@ -187,7 +201,7 @@ def clear_tracking_history():
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier GPS-enabled Server Agent with Tracking History is active!"})
+    return jsonify({"status": "online", "message": "E-Kurier GPS-enabled Server Agent with Robust Cookies is active!"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
