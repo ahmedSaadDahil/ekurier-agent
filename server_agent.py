@@ -14,57 +14,7 @@ app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 HARETH_WHATSAPP_NUMBER = "whatsapp:+4917656970147"
 
-# قائمة لتخزين سجل مسار حارث بالكامل مع الوقت
-hareth_tracking_history = []
-
-@app.route("/whatsapp", methods=["POST"])
-def whatsapp_webhook():
-    incoming_msg = request.form.get("Body", "").strip()
-    sender = request.form.get("From", "")
-    resp = MessagingResponse()
-    reply = resp.message()
-
-    if not incoming_msg:
-        reply.body("أهلاً بك يا أبو شهاب")
-        return str(resp)
-
-    if not GEMINI_API_KEY:
-        reply.body("مفتاح الـ API غير مضبوط")
-        return str(resp)
-
-    if sender == HARETH_WHATSAPP_NUMBER:
-        system_instruction = (
-            "أنت مساعد نظام نقل مخصص حصرياً لأخيك حارث. مهامك ثابتة ومحصورة في إدارة شحنات وحمولات "
-            "سيارة Fiat Ducato (L3H2/L4H2). نطاق أسعار الشحن لديك بين 1.00 إلى 1.30 يورو لكل كيلومتر. "
-            "كن دقيقاً، مختصراً، ومباشراً في تفاصيل الحمولات وعمليات الحجز."
-        )
-    else:
-        system_instruction = (
-            "أنت مساعد شخصي ذكي وشامل لأحمد (أبو شهاب). يمكنك الإجابة على أي سؤال يطلبه، "
-            "سواء في البرمجة، التحليل، الأفكار، أو أي استفسار عام."
-        )
-
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=incoming_msg,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.7,
-            ),
-        )
-        if response and response.text:
-            reply.body(response.text)
-        else:
-            reply.body("عذراً يا أبو شهاب، لم أتمكن من صياغة الإجابة.")
-    except Exception as e:
-        print(f"Error occurred: {str(e)}")
-        reply.body("حدث خطأ في الاتصال بالنموذج.")
-
-    return str(resp)
-
-# مسار جديد لاستقبال وتحديث الكوكيز تلقائياً من تطبيق حارث
+# مسار استقبال وتحديث الكوكيز من تطبيق حارث (WebView)
 @app.route("/api/update-cookies", methods=["POST"])
 def update_cookies():
     try:
@@ -72,11 +22,11 @@ def update_cookies():
         if not data:
             return jsonify({"status": "error", "message": "No data received"}), 400
         
-        # حفظ الكوكيز المرسلة في ملف session.json
+        # حفظ الكوكيز في ملف session.json
         with open("session.json", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
             
-        print("✅ تم تحديث ملف session.json بنجاح عبر التطبيق!")
+        print("✅ تم تحديث وحفظ جلسة الكوكيز بنجاح عبر التطبيق!")
         return jsonify({
             "status": "success",
             "message": "تم تحديث وحفظ الجلسة بنجاح"
@@ -85,29 +35,10 @@ def update_cookies():
         print(f"❌ Error updating cookies: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# مسار لجلب الحمولات الحقيقية مع استقبال إحداثيات الـ GPS وتخزينها في سجل المسار
+# مسار جلب الحمولات الحقيقية (النسخة الصافية والمستقرة التي كانت تعمل بنجاح)
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     try:
-        hareth_lat = float(request.args.get("lat", 0.0))
-        hareth_lon = float(request.args.get("lon", 0.0))
-
-        if hareth_lat != 0.0 and hareth_lon != 0.0:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            new_point = {"lat": hareth_lat, "lon": hareth_lon, "time": timestamp}
-            
-            if not hareth_tracking_history or (
-                hareth_tracking_history[-1]["lat"] != hareth_lat
-                or hareth_tracking_history[-1]["lon"] != hareth_lon
-            ):
-                hareth_tracking_history.append(new_point)
-
-        latest_gps = (
-            hareth_tracking_history[-1]
-            if hareth_tracking_history
-            else {"lat": hareth_lat, "lon": hareth_lon, "time": ""}
-        )
-
         url = "https://e-kurier.net/portal/freights"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -205,8 +136,6 @@ def get_live_hareth_loads():
         return jsonify({
             "status": "success",
             "driver": "حارث",
-            "gps_received": latest_gps,
-            "history_count": len(hareth_tracking_history),
             "total_fetched": len(formatted_loads),
             "loads": formatted_loads
         }), 200
@@ -214,25 +143,9 @@ def get_live_hareth_loads():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route("/api/track/history", methods=["GET"])
-def get_tracking_history():
-    return jsonify({
-        "status": "success",
-        "history": hareth_tracking_history
-    }), 200
-
-@app.route("/api/track/clear", methods=["POST"])
-def clear_tracking_history():
-    global hareth_tracking_history
-    hareth_tracking_history = []
-    return jsonify({
-        "status": "success",
-        "message": "تم مسح سجل المسار بنجاح"
-    }), 200
-
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Real Loads & Cookie Sync Server is active!"})
+    return jsonify({"status": "online", "message": "E-Kurier Clean Loads & Cookie Sync Server is active!"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
