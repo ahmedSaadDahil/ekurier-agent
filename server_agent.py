@@ -64,7 +64,7 @@ def whatsapp_webhook():
 
     return str(resp)
 
-# مسار لجلب الحمولات مع استقبال إحداثيات الـ GPS وتخزينها في سجل المسار التاريخي
+# مسار لجلب الحمولات الحقيقية مع استقبال إحداثيات الـ GPS وتخزينها في سجل المسار التاريخي
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     try:
@@ -76,14 +76,12 @@ def get_live_hareth_loads():
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             new_point = {"lat": hareth_lat, "lon": hareth_lon, "time": timestamp}
             
-            # منع تكرار حفظ نفس النقطة تماماً وراء بعض
             if not hareth_tracking_history or (
                 hareth_tracking_history[-1]["lat"] != hareth_lat
                 or hareth_tracking_history[-1]["lon"] != hareth_lon
             ):
                 hareth_tracking_history.append(new_point)
 
-        # آخر موقع تم تسجيله
         latest_gps = (
             hareth_tracking_history[-1]
             if hareth_tracking_history
@@ -119,7 +117,7 @@ def get_live_hareth_loads():
                 print(f"❌ Cookie error: {e}")
 
         all_scraped_loads = []
-        max_pages = 2 
+        max_pages = 3 
 
         with httpx.Client(headers=headers, cookies=cookies, follow_redirects=True, timeout=20.0) as client:
             for page_num in range(1, max_pages + 1):
@@ -130,15 +128,15 @@ def get_live_hareth_loads():
                 if response.status_code == 200:
                     soup = BeautifulSoup(response.text, 'html.parser')
                     
-                    # البحث عن عناصر الصفوف أو البطاقات التي تحمل بيانات الشحن في المنصة
-                    rows = soup.find_all(['tr', 'article', 'div'], class_=lambda x: x and ('freight' in x.lower() or 'load' in x.lower() or 'item' in x.lower()))
-                    if not rows:
-                        rows = soup.find_all(['tr', 'article', 'div'])
+                    # استخراج البطاقات أو الصفوف الحقيقية للحمولات من الموقع
+                    cards = soup.find_all(['article', 'tr', 'div'], class_=lambda x: x and ('freight' in x.lower() or 'load' in x.lower() or 'item' in x.lower() or 'card' in x.lower()))
+                    if not cards:
+                        cards = soup.find_all(['article', 'tr'])
 
-                    for row in rows:
-                        text = row.get_text(separator='\n', strip=True)
-                        # التحقق من وجود عناصر تشير إلى شحنة حقيقية
-                        if len(text) > 20 and ('DE ' in text or 'Loading' in text or 'km' in text or '€' in text):
+                    for card in cards:
+                        text = card.get_text(separator='\n', strip=True)
+                        # شروط دقيقة لالتقاط الحمولات الحقيقية التي تحتوي على رموز بريدية أو مدن أو مسافات
+                        if len(text) > 30 and ('DE ' in text or 'Loading' in text or 'km' in text or 'Unloading' in text):
                             lines = [line.strip() for line in text.split('\n') if line.strip()]
                             if lines and lines not in all_scraped_loads:
                                 all_scraped_loads.append(lines)
@@ -150,9 +148,8 @@ def get_live_hareth_loads():
             origin = "غير محدد"
             destination = "غير محدد"
             
-            # استخراج أصل النقطة والوجهة بذكاء من الأسطر
             for i, line in enumerate(lines):
-                if any(keyword in line for keyword in ['DE ', 'Loading', 'Garching', 'München', 'Aachen', 'Berlin', 'Frankfurt', 'Hamburg']):
+                if "DE " in line or "Loading" in line or "From" in line:
                     origin = line
                     if i + 1 < len(lines):
                         destination = lines[i + 1]
@@ -168,7 +165,7 @@ def get_live_hareth_loads():
                 continue
             seen_routes.add(route_key)
 
-            distance_km = 100.0
+            distance_km = 150.0
             for line in lines:
                 if "km" in line.lower() or "كم" in line:
                     nums = re.findall(r'\d+', line)
@@ -187,20 +184,6 @@ def get_live_hareth_loads():
                 "floor_price": floor_price,
                 "vehicle_match": "Fiat Ducato L4H2",
                 "raw_lines": lines
-            })
-
-        # ضمان إدراج حمولة ميونخ التي رآها حارث كعنصر رئيسي ضمن القائمة إذا كانت مفقودة
-        has_munich = any("Garching" in l.get("origin", "") or "München" in l.get("origin", "") for l in formatted_loads)
-        if not has_munich:
-            formatted_loads.insert(0, {
-                "id": 1,
-                "origin": "DE 85748 Garching bei München",
-                "destination": "DE 52074 Aachen",
-                "weight": "1200 كغ (Fiat Ducato)",
-                "distance_km": 69.0,
-                "floor_price": 107.64,
-                "vehicle_match": "Fiat Ducato L4H2",
-                "raw_lines": ["Loading: DE 85748 Garching bei München", "Unloading: DE 52074 Aachen"]
             })
 
         return jsonify({
@@ -233,7 +216,7 @@ def clear_tracking_history():
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier GPS-enabled Server Agent with Full Scraper is active!"})
+    return jsonify({"status": "online", "message": "E-Kurier Real Loads Scraper is active!"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
