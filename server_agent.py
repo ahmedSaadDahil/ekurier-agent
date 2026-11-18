@@ -25,7 +25,7 @@ SESSION_STORE = {
     "last_login_time": 0
 }
 
-# قاموس إحداثيات المدن الأوروبية الكبرى لضمان السرعة الفائقة والفلترة الفورية
+# قاموس إحداثيات المدن الأوروبية الكبرى للسرعة والفلترة
 EU_CITIES_COORDS = {
     "münchen": (48.1351, 11.5820), "munich": (48.1351, 11.5820),
     "ingolstadt": (48.7665, 11.4258),
@@ -137,6 +137,28 @@ def get_active_client():
         print(f"❌ [SESSION ERROR]: {e}")
         return client
 
+def is_suitable_for_fiat_ducato(card_text):
+    """فلترة صارمة للتأكد أن الحمولة تناسب سيارة Fiat Ducato ولا تتطلب شاحنة ضخمة أو مواصفات غير متوافقة"""
+    text_lower = card_text.lower()
+    
+    # 1. استبعاد الشاحنات الثقيلة والتريللات المذكورة صراحة في الإعلان
+    heavy_truck_keywords = ['sattel', 'tautliner', 'lkw', 'semi-trailer', 'mega', 'jumbo', 'aktions-lkw', 'szener']
+    for keyword in heavy_truck_keywords:
+        if keyword in text_lower:
+            return False  # مرفوضة لأنها تتطلب شاحنة ضخمة
+
+    # 2. فحص الوزن إن وجد (استبعاد ما يزيد عن 1500 كغ لأن طاقة الـ Ducato القصيرة/الطويلة بحدود 1200-1400 كغ)
+    weight_matches = re.findall(r'(\d+[\.,]?\d*)\s*(?:kg|kg\.|تاريخ|كغ)', text_lower)
+    for w in weight_matches:
+        try:
+            w_val = float(w.replace(',', '.'))
+            if w_val > 1600:  # أثقل من طاقة الفان
+                return False
+        except:
+            pass
+
+    return True  # الحمولة مناسبة وتمر من الفلتر
+
 def calculate_fast_road_distance(h_lat, h_lng, card_text):
     target_coords = None
     text_lower = card_text.lower()
@@ -211,9 +233,11 @@ def get_live_hareth_loads():
                 for card in cards:
                     text = card.get_text(separator='\n', strip=True)
                     if len(text) > 15:
-                        lines = [line.strip() for line in text.split('\n') if line.strip()]
-                        if lines not in all_scraped_loads:
-                            all_scraped_loads.append(lines)
+                        # 🛡️ تطبيق فلتر التوافق مع سيارة Fiat Ducato فوراً
+                        if is_suitable_for_fiat_ducato(text):
+                            lines = [line.strip() for line in text.split('\n') if line.strip()]
+                            if lines not in all_scraped_loads:
+                                all_scraped_loads.append(lines)
 
         formatted_loads = []
         for idx, lines in enumerate(all_scraped_loads, start=1):
@@ -249,6 +273,7 @@ def get_live_hareth_loads():
         if hareth_lat is not None and hareth_lng is not None:
             formatted_loads.sort(key=lambda x: x['hareth_distance_km'])
 
+        print(f"🚀 [FILTERED SUCCESS] تم فلترة وإرسال {len(formatted_loads)} حمولة متوافقة تماماً مع سيارة حارث!")
         return jsonify({
             "status": "success",
             "driver": "حارث",
@@ -264,7 +289,7 @@ def get_live_hareth_loads():
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Ultra-Fast In-Memory Agent Active"})
+    return jsonify({"status": "online", "message": "E-Kurier Ducato-Filtered Agent Active"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
