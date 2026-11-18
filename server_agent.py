@@ -60,11 +60,11 @@ def whatsapp_webhook():
 
     return str(resp)
 
-# مسار جلب الحمولات مع تتبع طباعة شامل وفاحص للبيئة
+# مسار فحص وتسجيل الدخول مع كشف الحقول
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     print("\n==========================================")
-    print("🔥 [DEBUG START] استدعاء مسار /api/loads جديد")
+    print("🔥 [DIAGNOSTIC] فحص صفحة تسجيل الدخول والحقول")
     print("==========================================")
     try:
         hareth_city = request.args.get("city", "").strip().lower()
@@ -72,8 +72,6 @@ def get_live_hareth_loads():
         
         username = os.environ.get("EKURIER_USER", "")
         password = os.environ.get("EKURIER_PASS", "")
-        
-        print(f"👤 التحقق من متغيرات البيئة: EKURIER_USER موجود؟ {bool(username)} | EKURIER_PASS موجود؟ {bool(password)}")
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -82,30 +80,32 @@ def get_live_hareth_loads():
         }
         
         with httpx.Client(headers=headers, follow_redirects=True, timeout=30.0) as client:
+            login_url = "https://e-kurier.net/portal/login"
+            print("🔑 جاري جلب صفحة تسجيل الدخول...")
+            login_page = client.get(login_url)
             
-            # محاولة الدخول إذا كانت المتغيرات موجودة
-            if username and password:
-                login_url = "https://e-kurier.net/portal/login"
-                print("🔑 جاري جلب صفحة تسجيل الدخول لاستخراج الـ Token...")
-                login_page = client.get(login_url)
-                
-                soup_login = BeautifulSoup(login_page.text, 'html.parser')
-                token_input = soup_login.select_one('input[name="_token"]')
-                token_val = token_input.get('value') if token_input else ""
-                print(f"🎫 حالة الـ CSRF Token المستخرج: {'موجود ✅' > '' if token_val else 'غير موجود ❌'}")
+            soup_login = BeautifulSoup(login_page.text, 'html.parser')
+            
+            # طباعة كافة أسماء حقول الإدخال في الصفحة لنراها في اللوجات
+            inputs = soup_login.find_all('input')
+            input_names = [inp.get('name') for inp in inputs if inp.get('name')]
+            print(f"📋 أسماء حقول الفورم المكتشفة في صفحة الدخول: {input_names}")
 
-                payload = {
-                    "email": username,
-                    "password": password
-                }
-                if token_val:
-                    payload["_token"] = token_val
+            token_input = soup_login.select_one('input[name="_token"]')
+            token_val = token_input.get('value') if token_input else ""
 
-                print("🚀 جاري إرسال طلب POST لتسجيل الدخول...")
-                login_resp = client.post(login_url, data=payload)
-                print(f"🔑 استجابة تسجيل الدخول - Status: {login_resp.status_code} - URL النهائي: {login_resp.url}")
-            else:
-                print("⚠️ تنبيه: بيانات تسجيل الدخول (EKURIER_USER / EKURIER_PASS) غير معرفة في Render!")
+            # نجرب الاحتمالين الشائعين لحقل البريد/المستخدم (email أو username)
+            payload = {
+                "email": username,      # سنختبر email أولاً
+                "username": username,   # وكاحتياط لو كانوا يستخدمون username
+                "password": password
+            }
+            if token_val:
+                payload["_token"] = token_val
+
+            print("🚀 جاري إرسال طلب POST لتسجيل الدخول...")
+            login_resp = client.post(login_url, data=payload)
+            print(f"🔑 استجابة تسجيل الدخول - Status: {login_resp.status_code} - URL النهائي: {login_resp.url}")
 
             all_scraped_loads = []
             max_pages = 2 
@@ -116,7 +116,7 @@ def get_live_hareth_loads():
                 print(f"📡 فحص الصفحة {page_num} - Status: {response.status_code} - URL النهائي: {response.url}")
 
                 if "login" in str(response.url).lower():
-                    print(f"⚠️ الصفحة {page_num} أعادت توجيهنا لصفحة الـ Login! يعني أن الجلسة لم يتم اعتمادها.")
+                    print(f"⚠️ تحذير: لا زلنا في صفحة الـ Login للصفحة {page_num}!")
 
                 if response.status_code == 200 and "login" not in str(response.url).lower():
                     soup = BeautifulSoup(response.text, 'html.parser')
@@ -164,7 +164,7 @@ def get_live_hareth_loads():
                 "raw_lines": lines
             })
 
-        print(f"✅ الحمولات النهائية المُجهزة للإرسال: {len(formatted_loads)}")
+        print(f"✅ الحمولات النهائية: {len(formatted_loads)}")
         print("==========================================\n")
         
         return jsonify({
@@ -175,7 +175,7 @@ def get_live_hareth_loads():
         }), 200
 
     except Exception as e:
-        print(f"❌ [CRITICAL ERROR] خطأ فادح أثناء جلب الحمولات: {str(e)}")
+        print(f"❌ [ERROR]: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/", methods=["GET"])
