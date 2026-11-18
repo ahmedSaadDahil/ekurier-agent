@@ -60,11 +60,11 @@ def whatsapp_webhook():
 
     return str(resp)
 
-# مسار فحص وتسجيل الدخول مع كشف الحقول
+# مسار الكشف التام عن الحقول وجلب الحمولات
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     print("\n==========================================")
-    print("🔥 [DIAGNOSTIC] فحص صفحة تسجيل الدخول والحقول")
+    print("🔍 [INSPECT FORM] فحص صفحة تسجيل الدخول بدقة")
     print("==========================================")
     try:
         hareth_city = request.args.get("city", "").strip().lower()
@@ -81,29 +81,31 @@ def get_live_hareth_loads():
         
         with httpx.Client(headers=headers, follow_redirects=True, timeout=30.0) as client:
             login_url = "https://e-kurier.net/portal/login"
-            print("🔑 جاري جلب صفحة تسجيل الدخول...")
             login_page = client.get(login_url)
             
             soup_login = BeautifulSoup(login_page.text, 'html.parser')
             
-            # طباعة كافة أسماء حقول الإدخال في الصفحة لنراها في اللوجات
-            inputs = soup_login.find_all('input')
-            input_names = [inp.get('name') for inp in inputs if inp.get('name')]
-            print(f"📋 أسماء حقول الفورم المكتشفة في صفحة الدخول: {input_names}")
+            # طباعة كافة الحقول (Inputs) الموجودة في الصفحة بالتفصيل
+            for idx, inp in enumerate(soup_login.find_all('input')):
+                print(f"📌 Input {idx}: name='{inp.get('name')}' | type='{inp.get('type')}' | id='{inp.get('id')}'")
 
             token_input = soup_login.select_one('input[name="_token"]')
             token_val = token_input.get('value') if token_input else ""
 
-            # نجرب الاحتمالين الشائعين لحقل البريد/المستخدم (email أو username)
+            # تغطية كافة الاحتمالات لأسماء الحقول في لارافيل
             payload = {
-                "email": username,      # سنختبر email أولاً
-                "username": username,   # وكاحتياط لو كانوا يستخدمون username
-                "password": password
+                "email": username,
+                "username": username,
+                "user[email]": username,
+                "login": username,
+                "password": password,
+                "pass": password,
+                "user[password]": password
             }
             if token_val:
                 payload["_token"] = token_val
 
-            print("🚀 جاري إرسال طلب POST لتسجيل الدخول...")
+            print("🚀 إرسال طلب POST لتسجيل الدخول بالتفاصيل الشاملة...")
             login_resp = client.post(login_url, data=payload)
             print(f"🔑 استجابة تسجيل الدخول - Status: {login_resp.status_code} - URL النهائي: {login_resp.url}")
 
@@ -114,9 +116,6 @@ def get_live_hareth_loads():
                 target_url = f"{url}?page={page_num}"
                 response = client.get(target_url)
                 print(f"📡 فحص الصفحة {page_num} - Status: {response.status_code} - URL النهائي: {response.url}")
-
-                if "login" in str(response.url).lower():
-                    print(f"⚠️ تحذير: لا زلنا في صفحة الـ Login للصفحة {page_num}!")
 
                 if response.status_code == 200 and "login" not in str(response.url).lower():
                     soup = BeautifulSoup(response.text, 'html.parser')
@@ -133,7 +132,7 @@ def get_live_hareth_loads():
                             if lines not in all_scraped_loads:
                                 all_scraped_loads.append(lines)
 
-        print(f"📦 إجمالي الحمولات الخام المستخرجة: {len(all_scraped_loads)}")
+        print(f"📦 إجمالي الحمولات المستخرجة: {len(all_scraped_loads)}")
 
         formatted_loads = []
         for idx, lines in enumerate(all_scraped_loads, start=1):
@@ -180,7 +179,7 @@ def get_live_hareth_loads():
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Diagnostic Agent is active!"})
+    return jsonify({"status": "online", "message": "E-Kurier Form Inspector Agent is active!"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
