@@ -60,15 +60,15 @@ def whatsapp_webhook():
 
     return str(resp)
 
-# مسار الكشف التام عن الحقول وجلب الحمولات
+# مسار جلب الحمولات مع التوثيق التلقائي الدقيق بالـ Fields الصحيحة
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     print("\n==========================================")
-    print("🔍 [INSPECT FORM] فحص صفحة تسجيل الدخول بدقة")
+    print("🔥 [PERFECT LOGIN] بدء محاولة تسجيل الدخول الحقيقية")
     print("==========================================")
     try:
         hareth_city = request.args.get("city", "").strip().lower()
-        url = "https://e-kurier.net/portal/freights"
+        freights_url = "https://e-kurier.net/portal/freights"
         
         username = os.environ.get("EKURIER_USER", "")
         password = os.environ.get("EKURIER_PASS", "")
@@ -80,42 +80,54 @@ def get_live_hareth_loads():
         }
         
         with httpx.Client(headers=headers, follow_redirects=True, timeout=30.0) as client:
-            login_url = "https://e-kurier.net/portal/login"
-            login_page = client.get(login_url)
+            login_page_url = "https://e-kurier.net/portal/login"
+            print("🔑 جاري جلب صفحة تسجيل الدخول لاستخراج الحقول والـ Action...")
+            login_page = client.get(login_page_url)
             
             soup_login = BeautifulSoup(login_page.text, 'html.parser')
             
-            # طباعة كافة الحقول (Inputs) الموجودة في الصفحة بالتفصيل
-            for idx, inp in enumerate(soup_login.find_all('input')):
-                print(f"📌 Input {idx}: name='{inp.get('name')}' | type='{inp.get('type')}' | id='{inp.get('id')}'")
+            # استخراج رابط الـ Action الفعلي للفورم إن وجد، وإلا نستخدم الرابط الافتراضي
+            form_tag = soup_login.find('form')
+            form_action = login_page_url
+            if form_tag and form_tag.get('action'):
+                action_attr = form_tag.get('action')
+                if action_attr.startswith('http'):
+                    form_action = action_attr
+                elif action_attr.startswith('/'):
+                    form_action = f"https://e-kurier.net{action_attr}"
+                else:
+                    form_action = f"https://e-kurier.net/portal/{action_attr}"
+            
+            print(f"🌐 رابط إرسال بيانات الدخول الفعلي (Form Action): {form_action}")
 
+            # استخراج التوكنات والحقول بدقة
             token_input = soup_login.select_one('input[name="_token"]')
             token_val = token_input.get('value') if token_input else ""
+            
+            inv_input = soup_login.select_one('input[name="invitation_token"]')
+            inv_val = inv_input.get('value') if inv_input else ""
 
-            # تغطية كافة الاحتمالات لأسماء الحقول في لارافيل
             payload = {
+                "_token": token_val,
+                "invitation_token": inv_val,
                 "email": username,
-                "username": username,
-                "user[email]": username,
-                "login": username,
-                "password": password,
-                "pass": password,
-                "user[password]": password
+                "password": password
             }
-            if token_val:
-                payload["_token"] = token_val
 
-            print("🚀 إرسال طلب POST لتسجيل الدخول بالتفاصيل الشاملة...")
-            login_resp = client.post(login_url, data=payload)
+            print("🚀 إرسال طلب POST لتسجيل الدخول بالحقول الصحيحة...")
+            login_resp = client.post(form_action, data=payload)
             print(f"🔑 استجابة تسجيل الدخول - Status: {login_resp.status_code} - URL النهائي: {login_resp.url}")
 
             all_scraped_loads = []
             max_pages = 2 
 
             for page_num in range(1, max_pages + 1):
-                target_url = f"{url}?page={page_num}"
+                target_url = f"{freights_url}?page={page_num}"
                 response = client.get(target_url)
-                print(f"📡 فحص الصفحة {page_num} - Status: {response.status_code} - URL النهائي: {response.url}")
+                print(f"📡 فحص صفحة الحمولات {page_num} - Status: {response.status_code} - URL النهائي: {response.url}")
+
+                if "login" in str(response.url).lower():
+                    print(f"⚠️ تحذير: لا زلنا تحويلنا لصفحة الـ Login للصفحة {page_num}!")
 
                 if response.status_code == 200 and "login" not in str(response.url).lower():
                     soup = BeautifulSoup(response.text, 'html.parser')
@@ -179,7 +191,7 @@ def get_live_hareth_loads():
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Form Inspector Agent is active!"})
+    return jsonify({"status": "online", "message": "E-Kurier Perfect Auth Agent is active!"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
