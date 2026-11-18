@@ -13,6 +13,13 @@ app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 HARETH_WHATSAPP_NUMBER = "whatsapp:+4917656970147"
 
+# تخزين إحداثيات حارث الحقيقية في الذاكرة المؤقتة
+REAL_DRIVER_LOCATION = {
+    "lat": None,
+    "lng": None,
+    "timestamp": "لم يتم رصد موقع حقيقي بعد"
+}
+
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
     incoming_msg = request.form.get("Body", "").strip()
@@ -60,12 +67,43 @@ def whatsapp_webhook():
 
     return str(resp)
 
-# مسار جلب الحمولات مع التوثيق التلقائي الدقيق بالـ Fields الصحيحة
+# مسار استقبال الإحداثيات الحقيقية من هاتف حارث
+@app.route("/api/update-gps", methods=["POST"])
+def update_gps():
+    try:
+        data = request.get_json()
+        if data and 'lat' in data and 'lng' in data:
+            REAL_DRIVER_LOCATION['lat'] = data['lat']
+            REAL_DRIVER_LOCATION['lng'] = data['lng']
+            REAL_DRIVER_LOCATION['timestamp'] = data.get('timestamp', 'فورية')
+            print(f"📍 [REAL GPS] تم تحديث موقع حارث: {REAL_DRIVER_LOCATION}")
+            return jsonify({"status": "success", "message": "GPS updated successfully"}), 200
+        return jsonify({"status": "error", "message": "Invalid GPS data"}), 400
+    except Exception as e:
+        print(f"❌ [GPS ERROR]: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# مسار جلب موقع حارث لتراها أنت من العراق
+@app.route("/api/get-gps", methods=["GET"])
+def get_gps():
+    try:
+        if REAL_DRIVER_LOCATION['lat'] is None:
+            return jsonify({
+                "status": "waiting",
+                "message": "في انتظار أن يقوم حارث بإرسال موقعه الحقيقي لأول مرة."
+            }), 200
+
+        return jsonify({
+            "status": "success",
+            "driver": "حارث",
+            "location": REAL_DRIVER_LOCATION
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# مسار جلب الحمولات الحية والآمنة
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
-    print("\n==========================================")
-    print("🔥 [PERFECT LOGIN] بدء محاولة تسجيل الدخول الحقيقية")
-    print("==========================================")
     try:
         hareth_city = request.args.get("city", "").strip().lower()
         freights_url = "https://e-kurier.net/portal/freights"
@@ -81,12 +119,9 @@ def get_live_hareth_loads():
         
         with httpx.Client(headers=headers, follow_redirects=True, timeout=30.0) as client:
             login_page_url = "https://e-kurier.net/portal/login"
-            print("🔑 جاري جلب صفحة تسجيل الدخول لاستخراج الحقول والـ Action...")
             login_page = client.get(login_page_url)
             
             soup_login = BeautifulSoup(login_page.text, 'html.parser')
-            
-            # استخراج رابط الـ Action الفعلي للفورم إن وجد، وإلا نستخدم الرابط الافتراضي
             form_tag = soup_login.find('form')
             form_action = login_page_url
             if form_tag and form_tag.get('action'):
@@ -97,10 +132,7 @@ def get_live_hareth_loads():
                     form_action = f"https://e-kurier.net{action_attr}"
                 else:
                     form_action = f"https://e-kurier.net/portal/{action_attr}"
-            
-            print(f"🌐 رابط إرسال بيانات الدخول الفعلي (Form Action): {form_action}")
 
-            # استخراج التوكنات والحقول بدقة
             token_input = soup_login.select_one('input[name="_token"]')
             token_val = token_input.get('value') if token_input else ""
             
@@ -114,9 +146,7 @@ def get_live_hareth_loads():
                 "password": password
             }
 
-            print("🚀 إرسال طلب POST لتسجيل الدخول بالحقول الصحيحة...")
             login_resp = client.post(form_action, data=payload)
-            print(f"🔑 استجابة تسجيل الدخول - Status: {login_resp.status_code} - URL النهائي: {login_resp.url}")
 
             all_scraped_loads = []
             max_pages = 2 
@@ -124,18 +154,12 @@ def get_live_hareth_loads():
             for page_num in range(1, max_pages + 1):
                 target_url = f"{freights_url}?page={page_num}"
                 response = client.get(target_url)
-                print(f"📡 فحص صفحة الحمولات {page_num} - Status: {response.status_code} - URL النهائي: {response.url}")
-
-                if "login" in str(response.url).lower():
-                    print(f"⚠️ تحذير: لا زلنا تحويلنا لصفحة الـ Login للصفحة {page_num}!")
 
                 if response.status_code == 200 and "login" not in str(response.url).lower():
                     soup = BeautifulSoup(response.text, 'html.parser')
                     cards = soup.find_all('article')
                     if not cards:
                         cards = soup.select('div[class*="freight"], tr')
-                    
-                    print(f"🔎 عدد البطاقات المكتشفة في الصفحة {page_num}: {len(cards)}")
 
                     for card in cards:
                         text = card.get_text(separator='\n', strip=True)
@@ -143,8 +167,6 @@ def get_live_hareth_loads():
                             lines = [line.strip() for line in text.split('\n') if line.strip()]
                             if lines not in all_scraped_loads:
                                 all_scraped_loads.append(lines)
-
-        print(f"📦 إجمالي الحمولات المستخرجة: {len(all_scraped_loads)}")
 
         formatted_loads = []
         for idx, lines in enumerate(all_scraped_loads, start=1):
@@ -175,9 +197,6 @@ def get_live_hareth_loads():
                 "raw_lines": lines
             })
 
-        print(f"✅ الحمولات النهائية: {len(formatted_loads)}")
-        print("==========================================\n")
-        
         return jsonify({
             "status": "success",
             "driver": "حارث",
@@ -186,12 +205,11 @@ def get_live_hareth_loads():
         }), 200
 
     except Exception as e:
-        print(f"❌ [ERROR]: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Perfect Auth Agent is active!"})
+    return jsonify({"status": "online", "message": "E-Kurier Agent with Live GPS is active!"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
