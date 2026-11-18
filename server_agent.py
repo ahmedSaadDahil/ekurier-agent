@@ -3,6 +3,7 @@ import json
 import httpx
 from bs4 import BeautifulSoup
 import re
+import math
 from flask import Flask, request, jsonify
 from twilio.twiml.messaging_response import MessagingResponse
 from google import genai
@@ -13,12 +14,16 @@ app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 HARETH_WHATSAPP_NUMBER = "whatsapp:+4917656970147"
 
-# تخزين إحداثيات حارث الحقيقية في الذاكرة المؤقتة
+# تخزين إحداثيات حارث الحقيقية في الذاكرة المؤقتة (يعمل في أي مكان في أوروبا)
 REAL_DRIVER_LOCATION = {
     "lat": 51.1657,
     "lng": 10.4515,
+    "country": "Germany",
     "timestamp": "في انتظار أول تحديث حقيقي"
 }
+
+# ذاكرة مؤقتة للمسافات المحسوبة سابقاً لأي مدينة أوروبية لضمان السرعة الصاروخية ومنع الـ 502
+DISTANCE_CACHE = {}
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
@@ -37,7 +42,7 @@ def whatsapp_webhook():
 
     if sender == HARETH_WHATSAPP_NUMBER:
         system_instruction = (
-            "أنت مساعد نظام نقل مخصص حصرياً لأخيك حارث. مهامك ثابتة ومحصورة في إدارة شحنات وحمولات "
+            "أنت مساعد نظام نقل مخصص حصرياً لأخيك حارث في عموم أوروبا. مهامك ثابتة ومحصورة في إدارة شحنات وحمولات "
             "سيارة Fiat Ducato (L3H2/L4H2). نطاق أسعار الشحن لديك بين 1.00 إلى 1.30 يورو لكل كيلومتر. "
             "كن دقيقاً، مختصراً، ومباشراً في تفاصيل الحمولات وعمليات الحجز."
         )
@@ -67,7 +72,6 @@ def whatsapp_webhook():
 
     return str(resp)
 
-# مسار استقبال الإحداثيات الحقيقية من هاتف حارث
 @app.route("/api/update-gps", methods=["POST"])
 def update_gps():
     try:
@@ -75,15 +79,15 @@ def update_gps():
         if data and 'lat' in data and 'lng' in data:
             REAL_DRIVER_LOCATION['lat'] = data['lat']
             REAL_DRIVER_LOCATION['lng'] = data['lng']
+            REAL_DRIVER_LOCATION['country'] = data.get('country', 'Europe')
             REAL_DRIVER_LOCATION['timestamp'] = data.get('timestamp', 'فورية')
-            print(f"📍 [REAL GPS] تم تحديث موقع حارث: {REAL_DRIVER_LOCATION}")
+            print(f"📍 [EU GPS] تم تحديث موقع حارث: {REAL_DRIVER_LOCATION}")
             return jsonify({"status": "success", "message": "GPS updated successfully"}), 200
         return jsonify({"status": "error", "message": "Invalid GPS data"}), 400
     except Exception as e:
         print(f"❌ [GPS ERROR]: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# مسار جلب موقع حارث لتراها أنت من العراق
 @app.route("/api/get-gps", methods=["GET"])
 def get_gps():
     try:
@@ -95,18 +99,23 @@ def get_gps():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# دالة ذكية تستخدم Gemini لتقدير مسافة الطريق الفعلية من موقع حارث إلى مدينة التحميل
-def get_ai_road_distance(hareth_lat, hareth_lng, origin_text):
+# دالة ذكية وعامة لأوروبا تستخدم Gemini مع نظام تخزين مؤقت (Cache) لمنع بطء السيرفر
+def get_europe_road_distance(hareth_lat, hareth_lng, origin_text):
+    # تنظيف نص العنوان للبحث في الذاكرة المؤقتة
+    cache_key = origin_text.strip().lower()
+    if cache_key in DISTANCE_CACHE:
+        return DISTANCE_CACHE[cache_key]
+
     if not GEMINI_API_KEY:
-        return 50.0  # قيمة افتراضية في حال عدم توفر المفتاح
-    
+        return 150.0
+
     prompt = (
-        f"حارث متواجد حالياً في ألمانيا عند إحداثيات خط العرض {hareth_lat} وخط الطول {hareth_lng}.\n"
-        f"نقطة التحميل الخاصة بالحمولة هي: '{origin_text}'.\n"
-        f"باعتبارك خبيراً بجغرافية الطرق في ألمانيا (Autobahn والشوارع)، قم بتقدير **مسافة القيادة الفعلية عبر الطريق** (Road Distance) بالكيلومتر بين موقع حارث ونقطة التحميل.\n"
-        f"أجب **حصراً** برقم فقط يمثل المسافة بالكيلومتر (مثال: 45 أو 120.5)، بدون أي كلمات إضافية."
+        f"حارث السائق متواجد في أوروبا عند الإحداثيات (خط العرض {hareth_lat}, خط الطول {hareth_lng}).\n"
+        f"عنوان نقطة التحميل في أي دولة أوروبية هو: '{origin_text}'.\n"
+        f"باعتبارك خبيراً بجغرافية الطرق الأوروبية، قدر مسافة القيادة الفعلية بالطرق (Road Distance) بالكيلومتر بين موقع حارث ونقطة التحميل.\n"
+        f"أجب حصراً برقم صحيح أو عشري يمثل المسافة بالكيلومتر (مثال: 75 أو 340.5)، بدون أي كلمات أو حروف إضافية."
     )
-    
+
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         response = client.models.generate_content(
@@ -114,16 +123,18 @@ def get_ai_road_distance(hareth_lat, hareth_lng, origin_text):
             contents=prompt,
         )
         if response and response.text:
-            # استخراج الأرقام من رد النموذج
-            clean_text = re.findall(r'\d+\.?\d*', response.text)
-            if clean_text:
-                return float(clean_text[0])
+            clean_nums = re.findall(r'\d+\.?\d*', response.text)
+            if clean_nums:
+                dist = float(clean_nums[0])
+                # حفظ النتيجة في الذاكرة المؤقتة لكي لا يتم استدعاء النموذج لهذه المدینة مرة أخرى
+                DISTANCE_CACHE[cache_key] = dist
+                return dist
     except Exception as e:
-        print(f"⚠️ AI Distance Error: {str(e)}")
-    
-    return 50.0  # قيمة احتياطية
+        print(f"⚠️ EU AI Distance Error: {str(e)}")
 
-# مسار جلب وترتيب الحمولات باستخدام الذكاء الاصطناعي ومسافة الطريق الحقيقية
+    return 100.0  # قيمة احتياطية آمنة
+
+# مسار جلب وترتيب الحمولات لعموم أوروبا بناءً على موقع حارث اللحظي
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     try:
@@ -196,7 +207,7 @@ def get_live_hareth_loads():
             origin = lines[0] if len(lines) > 0 else "غير محدد"
             destination = lines[1] if len(lines) > 1 else "غير محدد"
             
-            distance_km = 300.0
+            distance_km = 100.0
             for line in lines:
                 if "km" in line.lower() or "كم" in line:
                     nums = re.findall(r'\d+', line)
@@ -204,8 +215,8 @@ def get_live_hareth_loads():
                         distance_km = float(nums[0])
                         break
 
-            # 🧠 استخدام Gemini لتقدير مسافة الطريق الفعلية من موقع حارث لنقطة التحميل
-            road_distance_to_origin = get_ai_road_distance(hareth_lat, hareth_lng, origin)
+            # حساب المسافة الذكية لعموم أوروبا بناءً على موقع حارث اللحظي
+            hareth_distance_to_origin = get_europe_road_distance(hareth_lat, hareth_lng, origin)
 
             floor_price = round(distance_km * 1.3 * 1.2, 2)
 
@@ -215,13 +226,13 @@ def get_live_hareth_loads():
                 "destination": destination,
                 "weight": "1200 كغ (Fiat Ducato)",
                 "distance_km": distance_km,
-                "hareth_distance_km": road_distance_to_origin, # مسافة الطريق الفعلية
+                "hareth_distance_km": hareth_distance_to_origin,
                 "floor_price": floor_price,
                 "vehicle_match": "Fiat Ducato L4H2",
                 "raw_lines": lines
             })
 
-        # 🚀 الترتيب الذكي: فرز الحمولات تصاعدياً حسب مسافة الطريق الفعلية الأقرب لحارث
+        # ترتيب الحمولات تصاعدياً حسب الأقرب لموقع حارث أينما كان في أوروبا
         formatted_loads.sort(key=lambda x: x['hareth_distance_km'])
 
         return jsonify({
@@ -237,7 +248,7 @@ def get_live_hareth_loads():
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier AI Road Distance Agent is active!"})
+    return jsonify({"status": "online", "message": "E-Kurier Pan-European AI Routing Agent is active!"})
 
 @app.route("/favicon.ico")
 def favicon():
