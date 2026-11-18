@@ -60,14 +60,14 @@ def whatsapp_webhook():
 
     return str(resp)
 
-# مسار جلب الحمولات الحية مع تفاصيل فحص الكوكيز
+# مسار جلب الحمولات مع طباعة فورية إجبارية للتحقق
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
+    print("🔥 [CRITICAL DEBUG] تم استدعاء مسار /api/loads بنجاح تام!")
     try:
         hareth_city = request.args.get("city", "").strip().lower()
-        print("🔍 [DEBUG] بدء عملية جلب الحمولات من السيرفر...")
-
         url = "https://e-kurier.net/portal/freights"
+        
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -75,7 +75,6 @@ def get_live_hareth_loads():
             "Referer": "https://e-kurier.net/portal/dashboard"
         }
 
-        # تحميل الكوكيز المحفوظة
         cookies = {}
         if os.path.exists("session.json"):
             try:
@@ -84,24 +83,20 @@ def get_live_hareth_loads():
                     if "cookies" in session_data:
                         for cookie in session_data["cookies"]:
                             cookies[cookie["name"]] = cookie["value"]
-                print(f"🍪 [DEBUG] تم تحميل الكوكيز بنجاح. الأسماء الموجودة: {list(cookies.keys())}")
+                print(f"🍪 [CRITICAL DEBUG] عدد الكوكيز المحملة: {len(cookies)}")
             except Exception as e:
-                print(f"❌ [DEBUG] خطأ في قراءة ملف session.json: {e}")
+                print(f"❌ [CRITICAL DEBUG] خطأ قراءة الكوكيز: {e}")
         else:
-            print("⚠️ [DEBUG] تحذير: ملف session.json غير موجود نهائياً!")
+            print("⚠️ [CRITICAL DEBUG] ملف session.json غير موجود!")
 
         all_scraped_loads = []
-        max_pages = 3 
+        max_pages = 2 
 
         with httpx.Client(headers=headers, cookies=cookies, follow_redirects=True, timeout=20.0) as client:
             for page_num in range(1, max_pages + 1):
                 target_url = f"{url}?page={page_num}"
                 response = client.get(target_url)
-                print(f"📡 [DEBUG] الصفحة {page_num} استجابت برمز: {response.status_code} | الرابط النهائي: {response.url}")
-                
-                # إذا قام الموقع بإعادة التوجيه لصفحة الـ login، فهذا يعني أن الكوكيز غير صالحة أو غير مسجلة دخول
-                if "login" in str(response.url).lower():
-                    print("⚠️ [DEBUG] تنبيه: تم إعادة التوجيه إلى صفحة تسجيل الدخول! الجلسة غير مصرح لها.")
+                print(f"📡 [CRITICAL DEBUG] صفحة {page_num} - Status: {response.status_code} - URL: {response.url}")
 
                 if response.status_code == 200:
                     soup = BeautifulSoup(response.text, 'html.parser')
@@ -109,16 +104,16 @@ def get_live_hareth_loads():
                     if not cards:
                         cards = soup.select('div[class*="freight"], tr')
                     
-                    print(f"🔎 [DEBUG] الصفحة {page_num}: تم العثور على عدد {len(cards)} بطاقة.")
+                    print(f"🔎 [CRITICAL DEBUG] عدد البطاقات (Articles/Divs) المكتشفة في الصفحة {page_num}: {len(cards)}")
 
                     for card in cards:
                         text = card.get_text(separator='\n', strip=True)
-                        if len(text) > 40 and ('Loading:' in text or 'Distance' in text or 'Colli' in text):
+                        if len(text) > 20: # تم تخفيف الشرط قليلاً لالتقاط أي محتوى
                             lines = [line.strip() for line in text.split('\n') if line.strip()]
                             if lines not in all_scraped_loads:
                                 all_scraped_loads.append(lines)
 
-        print(f"📦 [DEBUG] إجمالي الحمولات المستخرجة: {len(all_scraped_loads)}")
+        print(f"📦 [CRITICAL DEBUG] إجمالي الحمولات الخام المستخرجة: {len(all_scraped_loads)}")
 
         formatted_loads = []
         for idx, lines in enumerate(all_scraped_loads, start=1):
@@ -149,6 +144,7 @@ def get_live_hareth_loads():
                 "raw_lines": lines
             })
 
+        print(f"✅ [CRITICAL DEBUG] الحمولات النهائية بعد المعالجة: {len(formatted_loads)}")
         return jsonify({
             "status": "success",
             "driver": "حارث",
@@ -157,30 +153,26 @@ def get_live_hareth_loads():
         }), 200
 
     except Exception as e:
-        print(f"❌ [DEBUG ERROR] خطأ أثناء جلب الحمولات: {str(e)}")
+        print(f"❌ [CRITICAL DEBUG ERROR]: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# مسار استقبال وحفظ الكوكيز من التطبيق
+# مسار استقبال وحفظ الكوكيز
 @app.route("/api/update-cookies", methods=["POST"])
 def update_cookies():
     try:
         cookies_data = request.get_json()
-        print(f"📥 [DEBUG] تم استلام الكوكيز من التطبيق. البيانات الواردة: {cookies_data}")
-        
+        print(f"📥 [UPDATE COOKIES] تم استلام عدد {len(cookies_data) if cookies_data else 0} كوكيز.")
         if not cookies_data:
             return jsonify({"status": "error", "message": "No cookies provided"}), 400
         
-        session_payload = {
-            "cookies": cookies_data
-        }
-        
+        session_payload = {"cookies": cookies_data}
         with open("session.json", "w", encoding="utf-8") as f:
             json.dump(session_payload, f, ensure_ascii=False, indent=4)
             
-        print("💾 [DEBUG] تم حفظ ملف session.json بنجاح!")
+        print("💾 [UPDATE COOKIES] تم حفظ session.json بنجاح!")
         return jsonify({"status": "success", "message": "Cookies updated successfully"}), 200
     except Exception as e:
-        print(f"❌ [DEBUG ERROR] خطأ حفظ الكوكيز: {str(e)}")
+        print(f"❌ [UPDATE COOKIES ERROR]: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/", methods=["GET"])
