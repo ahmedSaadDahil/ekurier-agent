@@ -3,7 +3,6 @@ import json
 import httpx
 from bs4 import BeautifulSoup
 import re
-import math
 from flask import Flask, request, jsonify
 from twilio.twiml.messaging_response import MessagingResponse
 from google import genai
@@ -96,23 +95,40 @@ def get_gps():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# دالة حساب المسافة الجغرافية بالكيلومتر
-def calculate_distance(lat1, lon1, lat2, lon2):
-    if not lat1 or not lon1 or not lat2 or not lon2:
-        return 9999.0
-    R = 6371.0
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return round(R * c, 2)
+# دالة ذكية تستخدم Gemini لتقدير مسافة الطريق الفعلية من موقع حارث إلى مدينة التحميل
+def get_ai_road_distance(hareth_lat, hareth_lng, origin_text):
+    if not GEMINI_API_KEY:
+        return 50.0  # قيمة افتراضية في حال عدم توفر المفتاح
+    
+    prompt = (
+        f"حارث متواجد حالياً في ألمانيا عند إحداثيات خط العرض {hareth_lat} وخط الطول {hareth_lng}.\n"
+        f"نقطة التحميل الخاصة بالحمولة هي: '{origin_text}'.\n"
+        f"باعتبارك خبيراً بجغرافية الطرق في ألمانيا (Autobahn والشوارع)، قم بتقدير **مسافة القيادة الفعلية عبر الطريق** (Road Distance) بالكيلومتر بين موقع حارث ونقطة التحميل.\n"
+        f"أجب **حصراً** برقم فقط يمثل المسافة بالكيلومتر (مثال: 45 أو 120.5)، بدون أي كلمات إضافية."
+    )
+    
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        if response and response.text:
+            # استخراج الأرقام من رد النموذج
+            clean_text = re.findall(r'\d+\.?\d*', response.text)
+            if clean_text:
+                return float(clean_text[0])
+    except Exception as e:
+        print(f"⚠️ AI Distance Error: {str(e)}")
+    
+    return 50.0  # قيمة احتياطية
 
-# مسار جلب وترتيب الحمولات حسب الأقرب لموقع حارث
+# مسار جلب وترتيب الحمولات باستخدام الذكاء الاصطناعي ومسافة الطريق الحقيقية
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     try:
-        hareth_lat = REAL_DRIVER_LOCATION.get('lat')
-        hareth_lng = REAL_DRIVER_LOCATION.get('lng')
+        hareth_lat = REAL_DRIVER_LOCATION.get('lat', 51.1657)
+        hareth_lng = REAL_DRIVER_LOCATION.get('lng', 10.4515)
         freights_url = "https://e-kurier.net/portal/freights"
         
         username = os.environ.get("EKURIER_USER", "")
@@ -188,8 +204,8 @@ def get_live_hareth_loads():
                         distance_km = float(nums[0])
                         break
 
-            # مسافة تقريبية للتوضيح (يمكن ربطها بإحداثيات المدن الفعلية لاحقاً)
-            hareth_distance_to_origin = 15.0 
+            # 🧠 استخدام Gemini لتقدير مسافة الطريق الفعلية من موقع حارث لنقطة التحميل
+            road_distance_to_origin = get_ai_road_distance(hareth_lat, hareth_lng, origin)
 
             floor_price = round(distance_km * 1.3 * 1.2, 2)
 
@@ -199,18 +215,19 @@ def get_live_hareth_loads():
                 "destination": destination,
                 "weight": "1200 كغ (Fiat Ducato)",
                 "distance_km": distance_km,
-                "hareth_distance_km": hareth_distance_to_origin,
+                "hareth_distance_km": road_distance_to_origin, # مسافة الطريق الفعلية
                 "floor_price": floor_price,
                 "vehicle_match": "Fiat Ducato L4H2",
                 "raw_lines": lines
             })
 
-        # فرز الحمولات تصاعدياً لتكون الأقرب لموقع حارث في المقدمة لتجنب الخسائر
+        # 🚀 الترتيب الذكي: فرز الحمولات تصاعدياً حسب مسافة الطريق الفعلية الأقرب لحارث
         formatted_loads.sort(key=lambda x: x['hareth_distance_km'])
 
         return jsonify({
             "status": "success",
             "driver": "حارث",
+            "driver_location": REAL_DRIVER_LOCATION,
             "total_fetched": len(formatted_loads),
             "loads": formatted_loads
         }), 200
@@ -220,7 +237,11 @@ def get_live_hareth_loads():
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Agent with Smart Routing is active!"})
+    return jsonify({"status": "online", "message": "E-Kurier AI Road Distance Agent is active!"})
+
+@app.route("/favicon.ico")
+def favicon():
+    return "", 204
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
