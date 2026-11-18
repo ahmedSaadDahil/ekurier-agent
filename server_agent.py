@@ -12,20 +12,17 @@ app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 HARETH_WHATSAPP_NUMBER = "whatsapp:+4917656970147"
 
-# تخزين آخر موقع حقيقي وصل من هاتف حارث (متغير باستمرار)
+# تخزين آخر موقع حقيقي وصل من هاتف حارث
 REAL_DRIVER_LOCATION = {
     "lat": None,
     "lng": None,
     "timestamp": "لم يتم استلام موقع GPS من الهاتف بعد"
 }
 
-# ذاكرة مؤقتة لإحداثيات المدن ومسافات الطرق لتسريع الأداء
 CITY_COORDS_CACHE = {}
 ROUTE_DISTANCE_CACHE = {}
 
 def get_city_coordinates(full_card_text):
-    """استخراج اسم المدينة أو الرمز البريدي من كامل نص الحمولة وجلب إحداثياتها في أوروبا"""
-    # البحث عن نمط الرمز البريدي الأوروبي مع المدينة (مثل: D-85055 Ingolstadt أو 85055 Ingolstadt أو AT-1010 Wien)
     match = re.search(r'\b(?:[A-Z]{1,2}-)?(\d{4,5})\s+([A-Za-zÄÖÜäöüß\-\s]{3,25})', full_card_text)
     query = ""
     if match:
@@ -33,14 +30,12 @@ def get_city_coordinates(full_card_text):
         city_name = match.group(2).strip().split('\n')[0]
         query = f"{postal_code} {city_name}, Europe"
     else:
-        # إذا لم يجد رمزاً بريدياً، يأخذ أول سطرين للبحث
         query = full_card_text[:60]
 
     if query in CITY_COORDS_CACHE:
         return CITY_COORDS_CACHE[query]
 
     try:
-        # استخدام Nominatim (OpenStreetMap) المجاني لتحديد إحداثيات أي مدينة في أوروبا بدقة
         url = "https://nominatim.openstreetmap.org/search"
         params = {"q": query, "format": "json", "limit": 1}
         headers = {"User-Agent": "eKurierHarethAgent/1.0"}
@@ -51,18 +46,15 @@ def get_city_coordinates(full_card_text):
             CITY_COORDS_CACHE[query] = coords
             return coords
     except Exception as e:
-        print(f"Geocoding error for {query}: {e}")
-
+        print(f"🔍 [Geocoding Error]: {e}")
     return None
 
 def get_real_europe_road_distance(h_lat, h_lng, dest_lat, dest_lng):
-    """حساب مسافة القيادة الفعلية عبر الطرق الأوروبية باستخدام محرك OSRM"""
     cache_key = f"{round(h_lat,3)},{round(h_lng,3)}->{round(dest_lat,3)},{round(dest_lng,3)}"
     if cache_key in ROUTE_DISTANCE_CACHE:
         return ROUTE_DISTANCE_CACHE[cache_key]
 
     try:
-        # OSRM يطلب الإحداثيات بصيغة: longitude,latitude
         osrm_url = f"http://router.project-osrm.org/route/v1/driving/{h_lng},{h_lat};{dest_lng},{dest_lat}?overview=false"
         res = httpx.get(osrm_url, timeout=5.0)
         if res.status_code == 200:
@@ -73,9 +65,8 @@ def get_real_europe_road_distance(h_lat, h_lng, dest_lat, dest_lng):
                 ROUTE_DISTANCE_CACHE[cache_key] = distance_km
                 return distance_km
     except Exception as e:
-        print(f"OSRM Routing error: {e}")
-
-    return 9999.0 # في حال تعذر الحساب، توضع في أسفل القائمة
+        print(f"🔍 [OSRM Error]: {e}")
+    return 9999.0
 
 @app.route("/api/update-gps", methods=["POST"])
 def update_gps():
@@ -85,9 +76,11 @@ def update_gps():
             REAL_DRIVER_LOCATION['lat'] = float(data['lat'])
             REAL_DRIVER_LOCATION['lng'] = float(data['lng'])
             REAL_DRIVER_LOCATION['timestamp'] = data.get('timestamp', 'محدث الآن')
+            print(f"📍 [GPS UPDATE]: تم استلام موقع حارث بنجاح -> {REAL_DRIVER_LOCATION}")
             return jsonify({"status": "success", "location": REAL_DRIVER_LOCATION}), 200
         return jsonify({"status": "error", "message": "بيانات GPS غير صالحة"}), 400
     except Exception as e:
+        print(f"❌ [GPS ERROR]: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/api/get-gps", methods=["GET"])
@@ -101,7 +94,6 @@ def get_gps():
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     try:
-        # 1. الأولوية للإحداثيات المرسلة مباشرة مع الطلب من هاتف حارث، ثم آخر إحداثيات مخزنة
         req_lat = request.args.get('lat', type=float)
         req_lng = request.args.get('lng', type=float)
 
@@ -109,18 +101,21 @@ def get_live_hareth_loads():
             hareth_lat, hareth_lng = req_lat, req_lng
             REAL_DRIVER_LOCATION['lat'] = hareth_lat
             REAL_DRIVER_LOCATION['lng'] = hareth_lng
+            print(f"📍 [LOADS API] استخدام إحداثيات حارث الواردة من التطبيق: {hareth_lat}, {hareth_lng}")
         else:
             hareth_lat = REAL_DRIVER_LOCATION.get('lat')
             hareth_lng = REAL_DRIVER_LOCATION.get('lng')
+            print(f"📍 [LOADS API] استخدام الإحداثيات المخزنة مسبقاً: {hareth_lat}, {hareth_lng}")
 
         freights_url = "https://e-kurier.net/portal/freights"
         username = os.environ.get("EKURIER_USER", "")
         password = os.environ.get("EKURIER_PASS", "")
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         }
         
+        print("🔐 [SCRAPER] بدء عملية الاتصال وتسجيل الدخول إلى e-kurier.net...")
         with httpx.Client(headers=headers, follow_redirects=True, timeout=25.0) as client:
             login_page_url = "https://e-kurier.net/portal/login"
             login_page = client.get(login_page_url)
@@ -137,20 +132,42 @@ def get_live_hareth_loads():
                 "email": username,
                 "password": password
             }
-            client.post(login_page_url, data=payload)
+            
+            login_res = client.post(login_page_url, data=payload)
+            print(f"🔐 [SCRAPER] حالة تسجيل الدخول (Status Code): {login_res.status_code}")
+            print(f"🔐 [SCRAPER] الرابط الحالي بعد تسجيل الدخول: {login_res.url}")
 
             all_scraped_loads = []
             for page_num in range(1, 3):
-                response = client.get(f"{freights_url}?page={page_num}")
+                target_page = f"{freights_url}?page={page_num}"
+                print(f"📄 [SCRAPER] جاري جلب الصفحة رقم {page_num}: {target_page}")
+                
+                response = client.get(target_page)
+                print(f"📄 [SCRAPER] استجابة الصفحة {page_num} - Status: {response.status_code}, URL: {response.url}")
+                
                 if response.status_code == 200 and "login" not in str(response.url).lower():
                     soup = BeautifulSoup(response.text, 'html.parser')
-                    cards = soup.find_all('article') or soup.select('div[class*="freight"], tr')
-                    for card in cards:
+                    
+                    # البحث عن العناصر بكل الطرق المحتملة لضمان عدم تفويت أي بطاقة
+                    cards = soup.find_all('article')
+                    if not cards:
+                        cards = soup.select('div[class*="freight"], tr, div[class*="card"], li[class*="load"]')
+                    
+                    print(f"🔍 [SCRAPER] عدد البطاقات/العناصر المكتشفة في الصفحة {page_num}: {len(cards)}")
+
+                    for idx_card, card in enumerate(cards):
                         text = card.get_text(separator='\n', strip=True)
-                        if len(text) > 20:
+                        if len(text) > 15:
                             lines = [line.strip() for line in text.split('\n') if line.strip()]
                             if lines not in all_scraped_loads:
                                 all_scraped_loads.append(lines)
+                                print(f"✅ [CARD {idx_card}] تم استخراج أسطر بنجاح: {lines[:2]} (عدد الأسطر: {len(lines)})")
+                        else:
+                            print(تم تخطي بطاقة قصيرة جداً أو فارغة)")
+                else:
+                    print(f"⚠️ [SCRAPER] تم تحويلنا لصفحة تسجيل الدخول أو فشل جلب الصفحة {page_num}!")
+
+        print(f"📦 [PARSER] إجمالي الحمولات الفريدة المستخرجة: {len(all_scraped_loads)}")
 
         formatted_loads = []
         for idx, lines in enumerate(all_scraped_loads, start=1):
@@ -160,13 +177,12 @@ def get_live_hareth_loads():
             
             distance_km = 100.0
             for line in lines:
-                if "km" in line.lower():
+                if "km" in line.lower() or "كم" in line:
                     nums = re.findall(r'\d+', line)
                     if nums:
                         distance_km = float(nums[0])
                         break
 
-            # حساب المسافة الفعلية بالطريق من موقع حارث اللحظي
             road_dist_to_hareth = 9999.0
             if hareth_lat is not None and hareth_lng is not None:
                 city_coords = get_city_coordinates(full_text)
@@ -182,16 +198,16 @@ def get_live_hareth_loads():
                 "origin": origin,
                 "destination": destination,
                 "distance_km": distance_km,
-                "hareth_distance_km": road_dist_to_hareth, # المسافة الحقيقية عبر الطرق
+                "hareth_distance_km": road_dist_to_hareth,
                 "floor_price": floor_price,
                 "vehicle_match": "Fiat Ducato L4H2",
                 "raw_lines": lines
             })
 
-        # ترتيب الحمولات تصاعدياً من الأقرب لموقع حارث الفعلي
         if hareth_lat is not None and hareth_lng is not None:
             formatted_loads.sort(key=lambda x: x['hareth_distance_km'])
 
+        print(f"🚀 [RESPONSE] إرسال {len(formatted_loads)} حمولة إلى تطبيق حارث بنجاح.")
         return jsonify({
             "status": "success",
             "driver": "حارث",
@@ -202,11 +218,12 @@ def get_live_hareth_loads():
         }), 200
 
     except Exception as e:
+        print(f"❌ [CRITICAL ERROR IN /api/loads]: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Dynamic EU Routing Active"})
+    return jsonify({"status": "online", "message": "E-Kurier Debug Routing Active"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
