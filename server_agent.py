@@ -155,5 +155,4 @@ def get_live_hareth_loads():
                     print(f"🔍 [SCRAPER] عدد البطاقات/العناصر المكتشفة في الصفحة {page_num}: {len(cards)}")
 
                     for idx_card, card in enumerate(cards):
-                        text = card.get_text(separator='\n', strip=True)
-                        if
+                        text = card.get_text(separator
