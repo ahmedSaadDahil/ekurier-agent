@@ -30,14 +30,13 @@ SESSION_STORE = {
 }
 
 def get_active_client():
-    """إنشاء أو استرجاع جلسة مرور (Session) نشطة ومحفوظة لتجاوز حظر اللوجن"""
+    """إنشاء جلسة مرور (Session) واستخراج الفورم والتوكنات ديناميكياً لضمان نجاح اللوجن"""
     current_time = time.time()
-    # إذا كانت الجلسة موجودة ولم يمضِ عليها أكثر من 30 دقيقة، نستخدمها مباشرة
     if SESSION_STORE["client"] is not None and (current_time - SESSION_STORE["last_login_time"] < 1800):
         print("♻️ [SESSION] استخدام جلسة الاتصال المحفوظة النشطة مسبقاً.")
         return SESSION_STORE["client"]
 
-    print("🔐 [SESSION] الجلسة منتهية أو جديدة، جاري تسجيل الدخول من الصفر...")
+    print("🔐 [SESSION] جاري الاتصال بصفحة تسجيل الدخول واستخراج الفورم ديناميكياً...")
     username = os.environ.get("EKURIER_USER", "")
     password = os.environ.get("EKURIER_PASS", "")
 
@@ -54,27 +53,46 @@ def get_active_client():
         login_page = client.get(login_page_url)
         soup_login = BeautifulSoup(login_page.text, 'html.parser')
         
-        token_val = ""
-        token_input = soup_login.select_one('input[name="_token"]')
-        if token_input:
-            token_val = token_input.get('value', '')
+        # استخراج رابط الإرسال الفعلي للفورم (Form Action) لتجنب أخطاء التوجيه
+        form_tag = soup_login.find('form')
+        form_action = login_page_url
+        if form_tag and form_tag.get('action'):
+            action_attr = form_tag.get('action')
+            if action_attr.startswith('http'):
+                form_action = action_attr
+            elif action_attr.startswith('/'):
+                form_action = f"https://e-kurier.net{action_attr}"
+            else:
+                form_action = f"https://e-kurier.net/portal/{action_attr}"
 
-        payload = {
-            "_token": token_val,
-            "email": username,
-            "password": password
-        }
+        # استخراج جميع حقول الإدخال المخفية والظاهرة في الفورم تلقائياً (مثل _token)
+        payload = {}
+        if form_tag:
+            for input_tag in form_tag.find_all('input'):
+                name = input_tag.get('name')
+                value = input_tag.get('value', '')
+                if name:
+                    payload[name] = value
+
+        # تعيين بيانات الاعتماد الحقيقية
+        payload['email'] = username
+        payload['password'] = password
         
-        login_res = client.post(login_page_url, data=payload)
-        print(f"🔐 [SESSION] حالة تسجيل الدخول الجديدة - Status: {login_res.status_code}, URL: {login_res.url}")
+        print(f"🔐 [SESSION] إرسال طلب اللوجن إلى الرابط: {form_action}")
+        print(f"🔐 [SESSION] الحقول المستخرجة والمرسلة: {list(payload.keys())}")
+        
+        login_res = client.post(form_action, data=payload)
+        print(f"🔐 [SESSION] نتيجة اللوجن - Status: {login_res.status_code}, URL: {login_res.url}")
 
         if "login" not in str(login_res.url).lower():
             SESSION_STORE["client"] = client
             SESSION_STORE["last_login_time"] = current_time
-            print("✅ [SESSION] تمت عملية تسجيل الدخول بنجاح وحفظ الجلسة!")
+            print("✅ [SESSION] تم تسجيل الدخول بنجاح وحفظ الجلسة!")
             return client
         else:
-            print("⚠️ [SESSION] فشل تسجيل الدخول (تم إعادة التوجيه لصفحة اللوجن).")
+            print("⚠️ [SESSION] تنبيه: تم إعادة التوجيه لصفحة اللوجن، ولكن سنحاول جلب الحمولات بالجلسة الحالية.")
+            SESSION_STORE["client"] = client
+            SESSION_STORE["last_login_time"] = current_time
             return client
     except Exception as e:
         print(f"❌ [SESSION ERROR]: {e}")
@@ -165,7 +183,6 @@ def get_live_hareth_loads():
             hareth_lng = REAL_DRIVER_LOCATION.get('lng')
             print(f"📍 [LOADS API] استخدام الإحداثيات المخزنة مسبقاً: {hareth_lat}, {hareth_lng}")
 
-        # الحصول على الجلسة النشطة المحفوظة
         client = get_active_client()
         freights_url = "https://e-kurier.net/portal/freights"
 
@@ -177,9 +194,8 @@ def get_live_hareth_loads():
             response = client.get(target_page)
             print(f"📄 [SCRAPER] استجابة صفحة {page_num} - Status: {response.status_code}, URL: {response.url}")
             
-            # إذا حدث وانتهت الجلسة وتحولنا لصفحة اللوجن، نقوم بإلغاء الجلسة المحفوظة وإعادة المحاولة مرة واحدة
             if "login" in str(response.url).lower():
-                print("🔄 [SESSION EXPIRED] تم طرد الجلسة، إعادة محاولة تسجيل الدخول وتجديد الكوكيز...")
+                print("🔄 [SESSION EXPIRED] إعادة تعيين الجلسة وإعادة محاولة الدخول...")
                 SESSION_STORE["client"] = None
                 client = get_active_client()
                 response = client.get(target_page)
@@ -258,7 +274,7 @@ def get_live_hareth_loads():
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Persistent Session Agent Active"})
+    return jsonify({"status": "online", "message": "E-Kurier Dynamic Form Scraper Active"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
