@@ -60,77 +60,63 @@ def whatsapp_webhook():
 
     return str(resp)
 
-# دالة مساعدة لتسجيل الدخول تلقائياً من السيرفر واستخلاص الكوكيز الصالحة
-def get_fresh_client_with_login():
-    username = os.environ.get("EKURIER_USER")
-    password = os.environ.get("EKURIER_PASS")
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
-    }
-    
-    client = httpx.Client(headers=headers, follow_redirects=True, timeout=30.0)
-    
-    # 1. محاولة قراءة الكوكيز المحفوظة مسبقاً من session.json
-    cookies = {}
-    if os.path.exists("session.json"):
-        try:
-            with open("session.json", "r", encoding="utf-8") as f:
-                session_data = json.load(f)
-                if "cookies" in session_data:
-                    for cookie in session_data["cookies"]:
-                        cookies[cookie["name"]] = cookie["value"]
-                        client.cookies.set(cookie["name"], cookie["value"])
-        except Exception as e:
-            print(f"❌ خطأ قراءة session.json: {e}")
-
-    return client
-
-# مسار جلب الحمولات الحية مع التسجيل التلقائي الذكي
+# مسار جلب الحمولات مع تتبع طباعة شامل وفاحص للبيئة
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
-    print("🔥 [AUTO-LOGIN AGENT] بدء عملية جلب الحمولات...")
+    print("\n==========================================")
+    print("🔥 [DEBUG START] استدعاء مسار /api/loads جديد")
+    print("==========================================")
     try:
         hareth_city = request.args.get("city", "").strip().lower()
         url = "https://e-kurier.net/portal/freights"
         
-        with get_fresh_client_with_login() as client:
+        username = os.environ.get("EKURIER_USER", "")
+        password = os.environ.get("EKURIER_PASS", "")
+        
+        print(f"👤 التحقق من متغيرات البيئة: EKURIER_USER موجود؟ {bool(username)} | EKURIER_PASS موجود؟ {bool(password)}")
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+        }
+        
+        with httpx.Client(headers=headers, follow_redirects=True, timeout=30.0) as client:
+            
+            # محاولة الدخول إذا كانت المتغيرات موجودة
+            if username and password:
+                login_url = "https://e-kurier.net/portal/login"
+                print("🔑 جاري جلب صفحة تسجيل الدخول لاستخراج الـ Token...")
+                login_page = client.get(login_url)
+                
+                soup_login = BeautifulSoup(login_page.text, 'html.parser')
+                token_input = soup_login.select_one('input[name="_token"]')
+                token_val = token_input.get('value') if token_input else ""
+                print(f"🎫 حالة الـ CSRF Token المستخرج: {'موجود ✅' > '' if token_val else 'غير موجود ❌'}")
+
+                payload = {
+                    "email": username,
+                    "password": password
+                }
+                if token_val:
+                    payload["_token"] = token_val
+
+                print("🚀 جاري إرسال طلب POST لتسجيل الدخول...")
+                login_resp = client.post(login_url, data=payload)
+                print(f"🔑 استجابة تسجيل الدخول - Status: {login_resp.status_code} - URL النهائي: {login_resp.url}")
+            else:
+                print("⚠️ تنبيه: بيانات تسجيل الدخول (EKURIER_USER / EKURIER_PASS) غير معرفة في Render!")
+
             all_scraped_loads = []
             max_pages = 2 
 
             for page_num in range(1, max_pages + 1):
                 target_url = f"{url}?page={page_num}"
                 response = client.get(target_url)
-                print(f"📡 صفحة {page_num} - Status: {response.status_code} - URL: {response.url}")
+                print(f"📡 فحص الصفحة {page_num} - Status: {response.status_code} - URL النهائي: {response.url}")
 
-                # إذا ظهرت صفحة تسجيل الدخول، نحاول عمل Login تلقائي ببيانات البيئة
                 if "login" in str(response.url).lower():
-                    print("⚠️ الجلسة منتهية أو غير مسجلة، جاري محاولة تسجيل الدخول تلقائياً...")
-                    login_url = "https://e-kurier.net/portal/login"
-                    
-                    # جلب الصفحة أولاً لأخذ الـ CSRF Token إن وجد
-                    login_page = client.get(login_url)
-                    soup_login = BeautifulSoup(login_page.text, 'html.parser')
-                    token_input = soup_login.select_one('input[name="_token"]')
-                    token_val = token_input.get('value') if token_input else ""
-                    
-                    username = os.environ.get("EKURIER_USER", "")
-                    password = os.environ.get("EKURIER_PASS", "")
-                    
-                    payload = {
-                        "email": username,
-                        "password": password
-                    }
-                    if token_val:
-                        payload["_token"] = token_val
-                        
-                    login_resp = client.post(login_url, data=payload)
-                    print(f"🔑 نتيجة تسجيل الدخول التلقائي - Status: {login_resp.status_code} - URL: {login_resp.url}")
-                    
-                    # إعادة المحاولة بعد تسجيل الدخول
-                    response = client.get(target_url)
+                    print(f"⚠️ الصفحة {page_num} أعادت توجيهنا لصفحة الـ Login! يعني أن الجلسة لم يتم اعتمادها.")
 
                 if response.status_code == 200 and "login" not in str(response.url).lower():
                     soup = BeautifulSoup(response.text, 'html.parser')
@@ -178,7 +164,9 @@ def get_live_hareth_loads():
                 "raw_lines": lines
             })
 
-        print(f"✅ الحمولات النهائية بعد المعالجة: {len(formatted_loads)}")
+        print(f"✅ الحمولات النهائية المُجهزة للإرسال: {len(formatted_loads)}")
+        print("==========================================\n")
+        
         return jsonify({
             "status": "success",
             "driver": "حارث",
@@ -187,12 +175,12 @@ def get_live_hareth_loads():
         }), 200
 
     except Exception as e:
-        print(f"❌ خطأ أثناء الجلب التلقائي: {str(e)}")
+        print(f"❌ [CRITICAL ERROR] خطأ فادح أثناء جلب الحمولات: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Auto-Login Agent is active!"})
+    return jsonify({"status": "online", "message": "E-Kurier Diagnostic Agent is active!"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
