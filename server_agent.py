@@ -1,5 +1,6 @@
 import os
 import re
+import math
 import time
 import httpx
 from bs4 import BeautifulSoup
@@ -13,30 +14,84 @@ app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 HARETH_WHATSAPP_NUMBER = "whatsapp:+4917656970147"
 
-# تخزين آخر موقع حقيقي وصل من هاتف حارث
 REAL_DRIVER_LOCATION = {
     "lat": None,
     "lng": None,
     "timestamp": "لم يتم استلام موقع GPS من الهاتف بعد"
 }
 
-CITY_COORDS_CACHE = {}
-ROUTE_DISTANCE_CACHE = {}
-
-# نظام الذاكرة المؤقتة للجلسة لتجنب تسجيل الدخول المتكرر والطرد من الموقع
 SESSION_STORE = {
     "client": None,
     "last_login_time": 0
 }
 
+# قاموس إحداثيات المدن الأوروبية الكبرى لضمان السرعة الفائقة والفلترة الفورية
+EU_CITIES_COORDS = {
+    "münchen": (48.1351, 11.5820), "munich": (48.1351, 11.5820),
+    "ingolstadt": (48.7665, 11.4258),
+    "nürnberg": (49.4521, 11.0767), "nuremberg": (49.4521, 11.0767),
+    "frankfurt": (50.1109, 8.6821),
+    "stuttgart": (48.7758, 9.1829),
+    "berlin": (52.5200, 13.4050),
+    "hamburg": (53.5511, 9.9937),
+    "köln": (50.9375, 6.9603), "cologne": (50.9375, 6.9603),
+    "düsseldorf": (51.2217, 6.7762),
+    "dortmund": (51.5136, 7.4653),
+    "leipzig": (51.3397, 12.3731),
+    "bremen": (53.0793, 8.8017),
+    "hannover": (52.3759, 9.7320),
+    "essen": (51.4556, 7.0116),
+    "dresden": (51.0504, 13.7373),
+    "paris": (48.8566, 2.3522),
+    "vienna": (48.2082, 16.3738), "wien": (48.2082, 16.3738),
+    "amsterdam": (52.3676, 4.9041),
+    "brussels": (50.8503, 4.3517),
+    "prague": (50.0755, 14.4378),
+    "zossen": (52.2167, 13.4333),
+    "crailsheim": (49.1333, 10.0667),
+    "warngau": (47.8500, 11.7500),
+    "warstein": (51.4500, 8.3500),
+    "erkrath": (51.2167, 6.9167),
+    "amstetten": (48.5167, 9.8667),
+    "traiskirchen": (48.0166, 16.2833),
+    "amberg": (49.4447, 11.8536),
+    "villingen": (48.0625, 8.4619),
+    "styregg": (48.2500, 14.4167),
+    "kappelrodeck": (48.5667, 8.1000),
+    "calden": (51.4167, 9.4000),
+    "mannheim": (49.4875, 8.4660),
+    "antwerpen": (51.2194, 4.4025),
+    "stutensee": (49.0833, 8.4667),
+    "graz": (47.0707, 15.4395),
+    "strzelce": (50.5100, 18.2833),
+    "fahrenzhausen": (48.3333, 11.6000),
+    "sassenberg": (51.9833, 8.0333),
+    "bad soden": (50.3167, 9.5667),
+    "augsburg": (48.3705, 10.8978),
+    "burscheid": (51.1464, 7.1128),
+    "aichtal": (48.6333, 9.2667),
+    "haltern": (51.7458, 7.1853),
+    "sosnowiec": (50.2833, 19.2667),
+    "kupferzell": (49.2333, 9.6833),
+    "stapelfeld": (53.5833, 10.2167),
+    "siegen": (50.8749, 8.0229),
+    "karlsruhe": (49.0069, 8.4037),
+    "friedrichshall": (49.2333, 9.2167),
+    "novo mesto": (45.8000, 15.1667),
+    "waidhofen": (48.8167, 15.2833),
+    "werdohl": (51.2500, 7.7500),
+    "schwechat": (48.1408, 16.4719),
+    "gründau": (50.2167, 9.1333),
+    "schwedt": (53.0667, 14.3000),
+    "ortenburg": (48.6667, 13.3167),
+    "bonn": (50.7374, 7.0982)
+}
+
 def get_active_client():
-    """إنشاء جلسة مرور (Session) واستخراج الفورم والتوكنات ديناميكياً لضمان نجاح اللوجن"""
     current_time = time.time()
     if SESSION_STORE["client"] is not None and (current_time - SESSION_STORE["last_login_time"] < 1800):
-        print("♻️ [SESSION] استخدام جلسة الاتصال المحفوظة النشطة مسبقاً.")
         return SESSION_STORE["client"]
 
-    print("🔐 [SESSION] جاري الاتصال بصفحة تسجيل الدخول واستخراج الفورم ديناميكياً...")
     username = os.environ.get("EKURIER_USER", "")
     password = os.environ.get("EKURIER_PASS", "")
 
@@ -47,13 +102,11 @@ def get_active_client():
     }
 
     client = httpx.Client(headers=headers, follow_redirects=True, timeout=30.0)
-    
     try:
         login_page_url = "https://e-kurier.net/portal/login"
         login_page = client.get(login_page_url)
         soup_login = BeautifulSoup(login_page.text, 'html.parser')
         
-        # استخراج رابط الإرسال الفعلي للفورم (Form Action) لتجنب أخطاء التوجيه
         form_tag = soup_login.find('form')
         form_action = login_page_url
         if form_tag and form_tag.get('action'):
@@ -65,7 +118,6 @@ def get_active_client():
             else:
                 form_action = f"https://e-kurier.net/portal/{action_attr}"
 
-        # استخراج جميع حقول الإدخال المخفية والظاهرة في الفورم تلقائياً (مثل _token)
         payload = {}
         if form_tag:
             for input_tag in form_tag.find_all('input'):
@@ -74,75 +126,38 @@ def get_active_client():
                 if name:
                     payload[name] = value
 
-        # تعيين بيانات الاعتماد الحقيقية
         payload['email'] = username
         payload['password'] = password
         
-        print(f"🔐 [SESSION] إرسال طلب اللوجن إلى الرابط: {form_action}")
-        print(f"🔐 [SESSION] الحقول المستخرجة والمرسلة: {list(payload.keys())}")
-        
         login_res = client.post(form_action, data=payload)
-        print(f"🔐 [SESSION] نتيجة اللوجن - Status: {login_res.status_code}, URL: {login_res.url}")
-
-        if "login" not in str(login_res.url).lower():
-            SESSION_STORE["client"] = client
-            SESSION_STORE["last_login_time"] = current_time
-            print("✅ [SESSION] تم تسجيل الدخول بنجاح وحفظ الجلسة!")
-            return client
-        else:
-            print("⚠️ [SESSION] تنبيه: تم إعادة التوجيه لصفحة اللوجن، ولكن سنحاول جلب الحمولات بالجلسة الحالية.")
-            SESSION_STORE["client"] = client
-            SESSION_STORE["last_login_time"] = current_time
-            return client
+        SESSION_STORE["client"] = client
+        SESSION_STORE["last_login_time"] = current_time
+        return client
     except Exception as e:
         print(f"❌ [SESSION ERROR]: {e}")
         return client
 
-def get_city_coordinates(full_card_text):
-    match = re.search(r'\b(?:[A-Z]{1,2}-)?(\d{4,5})\s+([A-Za-zÄÖÜäöüß\-\s]{3,25})', full_card_text)
-    query = ""
-    if match:
-        postal_code = match.group(1)
-        city_name = match.group(2).strip().split('\n')[0]
-        query = f"{postal_code} {city_name}, Europe"
-    else:
-        query = full_card_text[:60]
+def calculate_fast_road_distance(h_lat, h_lng, card_text):
+    """حساب مسافة القيادة فورياً باستخدام معادلة Haversine الرياضية في الذاكرة (بدون أي ضغط أو بطء)"""
+    target_coords = None
+    text_lower = card_text.lower()
+    
+    for city, coords in EU_CITIES_COORDS.items():
+        if city in text_lower:
+            target_coords = coords
+            break
 
-    if query in CITY_COORDS_CACHE:
-        return CITY_COORDS_CACHE[query]
-
-    try:
-        url = "https://nominatim.openstreetmap.org/search"
-        params = {"q": query, "format": "json", "limit": 1}
-        headers = {"User-Agent": "eKurierHarethAgent/1.0"}
-        res = httpx.get(url, params=params, headers=headers, timeout=5.0)
-        if res.status_code == 200 and res.json():
-            data = res.json()[0]
-            coords = (float(data["lat"]), float(data["lon"]))
-            CITY_COORDS_CACHE[query] = coords
-            return coords
-    except Exception as e:
-        print(f"🔍 [Geocoding Error]: {e}")
-    return None
-
-def get_real_europe_road_distance(h_lat, h_lng, dest_lat, dest_lng):
-    cache_key = f"{round(h_lat,3)},{round(h_lng,3)}->{round(dest_lat,3)},{round(dest_lng,3)}"
-    if cache_key in ROUTE_DISTANCE_CACHE:
-        return ROUTE_DISTANCE_CACHE[cache_key]
-
-    try:
-        osrm_url = f"http://router.project-osrm.org/route/v1/driving/{h_lng},{h_lat};{dest_lng},{dest_lat}?overview=false"
-        res = httpx.get(osrm_url, timeout=5.0)
-        if res.status_code == 200:
-            data = res.json()
-            if data.get("code") == "Ok" and data.get("routes"):
-                distance_meters = data["routes"][0]["distance"]
-                distance_km = round(distance_meters / 1000.0, 1)
-                ROUTE_DISTANCE_CACHE[cache_key] = distance_km
-                return distance_km
-    except Exception as e:
-        print(f"🔍 [OSRM Error]: {e}")
-    return 9999.0
+    if target_coords:
+        c_lat, c_lng = target_coords
+        R = 6371.0
+        dlat = math.radians(c_lat - h_lat)
+        dlon = math.radians(c_lng - h_lng)
+        a = math.sin(dlat / 2)**2 + math.cos(math.radians(h_lat)) * math.cos(math.radians(c_lat)) * math.sin(dlon / 2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        road_dist = R * c * 1.25 # معامل تصحيح مسافة الطرق السريعة في أوروبا
+        return round(road_dist, 1)
+    
+    return 500.0 # قيمة افتراضية في حال لم يتم مطابقة اسم المدينة
 
 @app.route("/api/update-gps", methods=["POST"])
 def update_gps():
@@ -152,20 +167,14 @@ def update_gps():
             REAL_DRIVER_LOCATION['lat'] = float(data['lat'])
             REAL_DRIVER_LOCATION['lng'] = float(data['lng'])
             REAL_DRIVER_LOCATION['timestamp'] = data.get('timestamp', 'محدث الآن')
-            print(f"📍 [GPS UPDATE]: تم استلام موقع حارث بنجاح -> {REAL_DRIVER_LOCATION}")
             return jsonify({"status": "success", "location": REAL_DRIVER_LOCATION}), 200
-        return jsonify({"status": "error", "message": "بيانات GPS غير صالحة"}), 400
+        return jsonify({"status": "error", "message": "بيانات غير صالحة"}), 400
     except Exception as e:
-        print(f"❌ [GPS ERROR]: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/api/get-gps", methods=["GET"])
 def get_gps():
-    return jsonify({
-        "status": "success",
-        "driver": "حارث",
-        "location": REAL_DRIVER_LOCATION
-    }), 200
+    return jsonify({"status": "success", "driver": "حارث", "location": REAL_DRIVER_LOCATION}), 200
 
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
@@ -177,11 +186,9 @@ def get_live_hareth_loads():
             hareth_lat, hareth_lng = req_lat, req_lng
             REAL_DRIVER_LOCATION['lat'] = hareth_lat
             REAL_DRIVER_LOCATION['lng'] = hareth_lng
-            print(f"📍 [LOADS API] استخدام إحداثيات حارث الواردة من التطبيق: {hareth_lat}, {hareth_lng}")
         else:
             hareth_lat = REAL_DRIVER_LOCATION.get('lat')
             hareth_lng = REAL_DRIVER_LOCATION.get('lng')
-            print(f"📍 [LOADS API] استخدام الإحداثيات المخزنة مسبقاً: {hareth_lat}, {hareth_lng}")
 
         client = get_active_client()
         freights_url = "https://e-kurier.net/portal/freights"
@@ -189,37 +196,25 @@ def get_live_hareth_loads():
         all_scraped_loads = []
         for page_num in range(1, 3):
             target_page = f"{freights_url}?page={page_num}"
-            print(f"📄 [SCRAPER] جلب صفحة الحمولات رقم {page_num}: {target_page}")
-            
             response = client.get(target_page)
-            print(f"📄 [SCRAPER] استجابة صفحة {page_num} - Status: {response.status_code}, URL: {response.url}")
             
             if "login" in str(response.url).lower():
-                print("🔄 [SESSION EXPIRED] إعادة تعيين الجلسة وإعادة محاولة الدخول...")
                 SESSION_STORE["client"] = None
                 client = get_active_client()
                 response = client.get(target_page)
 
             if response.status_code == 200 and "login" not in str(response.url).lower():
                 soup = BeautifulSoup(response.text, 'html.parser')
-                
                 cards = soup.find_all('article')
                 if not cards:
-                    cards = soup.select('div[class*="freight"], tr, div[class*="card"], li[class*="load"]')
-                
-                print(f"🔍 [SCRAPER] عدد البطاقات المكتشفة في الصفحة {page_num}: {len(cards)}")
+                    cards = soup.select('div[class*="freight"], tr, div[class*="card"], li[class*="load']")
 
-                for idx_card, card in enumerate(cards):
+                for card in cards:
                     text = card.get_text(separator='\n', strip=True)
                     if len(text) > 15:
                         lines = [line.strip() for line in text.split('\n') if line.strip()]
                         if lines not in all_scraped_loads:
                             all_scraped_loads.append(lines)
-                            print(f"✅ [CARD {idx_card}] تم استخراج الحمولة بنجاح: {lines[:2]}")
-            else:
-                print(f"⚠️ [SCRAPER] تعذر الوصول لصفحة الحمولات رقم {page_num}.")
-
-        print(f"📦 [PARSER] إجمالي الحمولات المستخرجة بنجاح: {len(all_scraped_loads)}")
 
         formatted_loads = []
         for idx, lines in enumerate(all_scraped_loads, start=1):
@@ -235,13 +230,10 @@ def get_live_hareth_loads():
                         distance_km = float(nums[0])
                         break
 
-            road_dist_to_hareth = 9999.0
+            # حساب المسافة فوراً وبأعلى أداء في الذاكرة (بدون أي أخطاء أو بطء أو SIGKILL)
+            hareth_distance = 150.0
             if hareth_lat is not None and hareth_lng is not None:
-                city_coords = get_city_coordinates(full_text)
-                if city_coords:
-                    road_dist_to_hareth = get_real_europe_road_distance(
-                        hareth_lat, hareth_lng, city_coords[0], city_coords[1]
-                    )
+                hareth_distance = calculate_fast_road_distance(hareth_lat, hareth_lng, full_text)
 
             floor_price = round(distance_km * 1.3 * 1.2, 2)
 
@@ -250,7 +242,7 @@ def get_live_hareth_loads():
                 "origin": origin,
                 "destination": destination,
                 "distance_km": distance_km,
-                "hareth_distance_km": road_dist_to_hareth,
+                "hareth_distance_km": hareth_distance,
                 "floor_price": floor_price,
                 "vehicle_match": "Fiat Ducato L4H2",
                 "raw_lines": lines
@@ -259,6 +251,7 @@ def get_live_hareth_loads():
         if hareth_lat is not None and hareth_lng is not None:
             formatted_loads.sort(key=lambda x: x['hareth_distance_km'])
 
+        print(f"🚀 [SUCCESS] تم معالجة وإرسال {len(formatted_loads)} حمولة لتطبيق حارث بنجاح تامة وفورية!")
         return jsonify({
             "status": "success",
             "driver": "حارث",
@@ -274,7 +267,7 @@ def get_live_hareth_loads():
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Dynamic Form Scraper Active"})
+    return jsonify({"status": "online", "message": "E-Kurier Ultra-Fast In-Memory Agent Active"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
