@@ -60,12 +60,12 @@ def whatsapp_webhook():
 
     return str(resp)
 
-# مسار جلب الحمولات الحية باستخدام الكوكيز المحفوظة
+# مسار جلب الحمولات الحية مع تفاصيل فحص الكوكيز
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     try:
         hareth_city = request.args.get("city", "").strip().lower()
-        print("🔍 [DEBUG] بدء عملية جلب الحمولات...")
+        print("🔍 [DEBUG] بدء عملية جلب الحمولات من السيرفر...")
 
         url = "https://e-kurier.net/portal/freights"
         headers = {
@@ -84,11 +84,11 @@ def get_live_hareth_loads():
                     if "cookies" in session_data:
                         for cookie in session_data["cookies"]:
                             cookies[cookie["name"]] = cookie["value"]
-                print(f"🍪 [DEBUG] تم تحميل عدد {len(cookies)} كوكيز من ملف الجلسة.")
+                print(f"🍪 [DEBUG] تم تحميل الكوكيز بنجاح. الأسماء الموجودة: {list(cookies.keys())}")
             except Exception as e:
                 print(f"❌ [DEBUG] خطأ في قراءة ملف session.json: {e}")
         else:
-            print("⚠️ [DEBUG] ملف session.json غير موجود!")
+            print("⚠️ [DEBUG] تحذير: ملف session.json غير موجود نهائياً!")
 
         all_scraped_loads = []
         max_pages = 3 
@@ -97,15 +97,19 @@ def get_live_hareth_loads():
             for page_num in range(1, max_pages + 1):
                 target_url = f"{url}?page={page_num}"
                 response = client.get(target_url)
-                print(f"📡 [DEBUG] الصفحة {page_num} استجابت برمز: {response.status_code}, الرابط الفعلي: {response.url}")
+                print(f"📡 [DEBUG] الصفحة {page_num} استجابت برمز: {response.status_code} | الرابط النهائي: {response.url}")
                 
+                # إذا قام الموقع بإعادة التوجيه لصفحة الـ login، فهذا يعني أن الكوكيز غير صالحة أو غير مسجلة دخول
+                if "login" in str(response.url).lower():
+                    print("⚠️ [DEBUG] تنبيه: تم إعادة التوجيه إلى صفحة تسجيل الدخول! الجلسة غير مصرح لها.")
+
                 if response.status_code == 200:
                     soup = BeautifulSoup(response.text, 'html.parser')
                     cards = soup.find_all('article')
                     if not cards:
                         cards = soup.select('div[class*="freight"], tr')
                     
-                    print(f"🔎 [DEBUG] الصفحة {page_num}: وجدنا عدد {len(cards)} عنصر بطاقة.")
+                    print(f"🔎 [DEBUG] الصفحة {page_num}: تم العثور على عدد {len(cards)} بطاقة.")
 
                     for card in cards:
                         text = card.get_text(separator='\n', strip=True)
@@ -114,7 +118,7 @@ def get_live_hareth_loads():
                             if lines not in all_scraped_loads:
                                 all_scraped_loads.append(lines)
 
-        print(f"📦 [DEBUG] إجمالي الحمولات الخام المستخرجة: {len(all_scraped_loads)}")
+        print(f"📦 [DEBUG] إجمالي الحمولات المستخرجة: {len(all_scraped_loads)}")
 
         formatted_loads = []
         for idx, lines in enumerate(all_scraped_loads, start=1):
@@ -145,7 +149,6 @@ def get_live_hareth_loads():
                 "raw_lines": lines
             })
 
-        print(f"✅ [DEBUG] إجمالي الحمولات النهائية بعد التصفية: {len(formatted_loads)}")
         return jsonify({
             "status": "success",
             "driver": "حارث",
@@ -154,15 +157,15 @@ def get_live_hareth_loads():
         }), 200
 
     except Exception as e:
-        print(f"❌ [DEBUG ERROR] خطأ أثناء الجلب: {str(e)}")
+        print(f"❌ [DEBUG ERROR] خطأ أثناء جلب الحمولات: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# مسار استقبال وحفظ الكوكيز المرسلة من التطبيق
+# مسار استقبال وحفظ الكوكيز من التطبيق
 @app.route("/api/update-cookies", methods=["POST"])
 def update_cookies():
     try:
         cookies_data = request.get_json()
-        print(f"📥 [DEBUG] تم استلام طلب تحديث الكوكيز. العدد: {len(cookies_data) if cookies_data else 0}")
+        print(f"📥 [DEBUG] تم استلام الكوكيز من التطبيق. البيانات الواردة: {cookies_data}")
         
         if not cookies_data:
             return jsonify({"status": "error", "message": "No cookies provided"}), 400
