@@ -148,7 +148,6 @@ def get_live_hareth_loads():
                 if response.status_code == 200 and "login" not in str(response.url).lower():
                     soup = BeautifulSoup(response.text, 'html.parser')
                     
-                    # البحث عن العناصر بكل الطرق المحتملة لضمان عدم تفويت أي بطاقة
                     cards = soup.find_all('article')
                     if not cards:
                         cards = soup.select('div[class*="freight"], tr, div[class*="card"], li[class*="load"]')
@@ -157,73 +156,4 @@ def get_live_hareth_loads():
 
                     for idx_card, card in enumerate(cards):
                         text = card.get_text(separator='\n', strip=True)
-                        if len(text) > 15:
-                            lines = [line.strip() for line in text.split('\n') if line.strip()]
-                            if lines not in all_scraped_loads:
-                                all_scraped_loads.append(lines)
-                                print(f"✅ [CARD {idx_card}] تم استخراج أسطر بنجاح: {lines[:2]} (عدد الأسطر: {len(lines)})")
-                        else:
-                            print(تم تخطي بطاقة قصيرة جداً أو فارغة)")
-                else:
-                    print(f"⚠️ [SCRAPER] تم تحويلنا لصفحة تسجيل الدخول أو فشل جلب الصفحة {page_num}!")
-
-        print(f"📦 [PARSER] إجمالي الحمولات الفريدة المستخرجة: {len(all_scraped_loads)}")
-
-        formatted_loads = []
-        for idx, lines in enumerate(all_scraped_loads, start=1):
-            full_text = " | ".join(lines)
-            origin = lines[0] if len(lines) > 0 else "غير محدد"
-            destination = lines[1] if len(lines) > 1 else "غير محدد"
-            
-            distance_km = 100.0
-            for line in lines:
-                if "km" in line.lower() or "كم" in line:
-                    nums = re.findall(r'\d+', line)
-                    if nums:
-                        distance_km = float(nums[0])
-                        break
-
-            road_dist_to_hareth = 9999.0
-            if hareth_lat is not None and hareth_lng is not None:
-                city_coords = get_city_coordinates(full_text)
-                if city_coords:
-                    road_dist_to_hareth = get_real_europe_road_distance(
-                        hareth_lat, hareth_lng, city_coords[0], city_coords[1]
-                    )
-
-            floor_price = round(distance_km * 1.3 * 1.2, 2)
-
-            formatted_loads.append({
-                "id": idx,
-                "origin": origin,
-                "destination": destination,
-                "distance_km": distance_km,
-                "hareth_distance_km": road_dist_to_hareth,
-                "floor_price": floor_price,
-                "vehicle_match": "Fiat Ducato L4H2",
-                "raw_lines": lines
-            })
-
-        if hareth_lat is not None and hareth_lng is not None:
-            formatted_loads.sort(key=lambda x: x['hareth_distance_km'])
-
-        print(f"🚀 [RESPONSE] إرسال {len(formatted_loads)} حمولة إلى تطبيق حارث بنجاح.")
-        return jsonify({
-            "status": "success",
-            "driver": "حارث",
-            "gps_active": hareth_lat is not None,
-            "driver_location": REAL_DRIVER_LOCATION,
-            "total_fetched": len(formatted_loads),
-            "loads": formatted_loads
-        }), 200
-
-    except Exception as e:
-        print(f"❌ [CRITICAL ERROR IN /api/loads]: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route("/", methods=["GET"])
-def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Debug Routing Active"})
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+                        if
