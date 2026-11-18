@@ -138,7 +138,6 @@ def get_active_client():
         return client
 
 def calculate_fast_road_distance(h_lat, h_lng, card_text):
-    """حساب مسافة القيادة فورياً باستخدام معادلة Haversine الرياضية في الذاكرة (بدون أي ضغط أو بطء)"""
     target_coords = None
     text_lower = card_text.lower()
     
@@ -154,10 +153,10 @@ def calculate_fast_road_distance(h_lat, h_lng, card_text):
         dlon = math.radians(c_lng - h_lng)
         a = math.sin(dlat / 2)**2 + math.cos(math.radians(h_lat)) * math.cos(math.radians(c_lat)) * math.sin(dlon / 2)**2
         c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-        road_dist = R * c * 1.25 # معامل تصحيح مسافة الطرق السريعة في أوروبا
+        road_dist = R * c * 1.25
         return round(road_dist, 1)
     
-    return 500.0 # قيمة افتراضية في حال لم يتم مطابقة اسم المدينة
+    return 500.0
 
 @app.route("/api/update-gps", methods=["POST"])
 def update_gps():
@@ -207,7 +206,7 @@ def get_live_hareth_loads():
                 soup = BeautifulSoup(response.text, 'html.parser')
                 cards = soup.find_all('article')
                 if not cards:
-                    cards = soup.select('div[class*="freight"], tr, div[class*="card"], li[class*="load']")
+                    cards = soup.select('div[class*="freight"], tr, div[class*="card"], li[class*="load"]')
 
                 for card in cards:
                     text = card.get_text(separator='\n', strip=True)
@@ -230,7 +229,6 @@ def get_live_hareth_loads():
                         distance_km = float(nums[0])
                         break
 
-            # حساب المسافة فوراً وبأعلى أداء في الذاكرة (بدون أي أخطاء أو بطء أو SIGKILL)
             hareth_distance = 150.0
             if hareth_lat is not None and hareth_lng is not None:
                 hareth_distance = calculate_fast_road_distance(hareth_lat, hareth_lng, full_text)
@@ -251,7 +249,6 @@ def get_live_hareth_loads():
         if hareth_lat is not None and hareth_lng is not None:
             formatted_loads.sort(key=lambda x: x['hareth_distance_km'])
 
-        print(f"🚀 [SUCCESS] تم معالجة وإرسال {len(formatted_loads)} حمولة لتطبيق حارث بنجاح تامة وفورية!")
         return jsonify({
             "status": "success",
             "driver": "حارث",
