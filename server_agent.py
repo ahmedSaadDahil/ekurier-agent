@@ -151,6 +151,25 @@ def get_live_hareth_loads():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# مسار استلام وحفظ الكوكيز المرسلة من تطبيق الفلاتر
+@app.route("/api/update-cookies", methods=["POST"])
+def update_cookies():
+    try:
+        cookies_data = request.get_json()
+        if not cookies_data:
+            return jsonify({"status": "error", "message": "No cookies provided"}), 400
+        
+        session_payload = {
+            "cookies": cookies_data
+        }
+        
+        with open("session.json", "w", encoding="utf-8") as f:
+            json.dump(session_payload, f, ensure_ascii=False, indent=4)
+            
+        return jsonify({"status": "success", "message": "Cookies updated successfully"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 @app.route("/", methods=["GET"])
 def home_root():
     return jsonify({"status": "online", "message": "E-Kurier Live Scraper & Filter Agent is active!"})
