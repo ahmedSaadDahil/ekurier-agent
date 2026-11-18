@@ -60,12 +60,12 @@ def whatsapp_webhook():
 
     return str(resp)
 
-# مسار ديناميكي لجلب الحمولات الحية وتصفيتها حسب موقع حارث الجغرافي
+# مسار ديناميكي لجلب الحمولات الحية مع التتبع الكامل في الـ Logs
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     try:
-        # استقبال إحداثيات أو مدينة حارث الحالية من الـ Query Parameters (اختياري)
         hareth_city = request.args.get("city", "").strip().lower()
+        print("🔍 [DEBUG] بدء عملية جلب الحمولات...")
 
         url = "https://e-kurier.net/portal/freights"
         headers = {
@@ -75,7 +75,7 @@ def get_live_hareth_loads():
             "Referer": "https://e-kurier.net/portal/dashboard"
         }
 
-        # تحميل الكوكيز النشطة لجلسة الموقع
+        # تحميل الكوكيز
         cookies = {}
         if os.path.exists("session.json"):
             try:
@@ -84,22 +84,28 @@ def get_live_hareth_loads():
                     if "cookies" in session_data:
                         for cookie in session_data["cookies"]:
                             cookies[cookie["name"]] = cookie["value"]
+                print(f"🍪 [DEBUG] تم العثور على ملف الجلسة session.json وتحميل عدد {len(cookies)} كوكيز.")
             except Exception as e:
-                print(f"Cookie load error: {e}")
+                print(f"❌ [DEBUG] خطأ في قراءة ملف session.json: {e}")
+        else:
+            print("⚠️ [DEBUG] تنبيه: ملف session.json غير موجود على السيرفر نهائياً!")
 
         all_scraped_loads = []
-        # سحب أول صفحتين أو ثلاث كبداية لسرعة استجابة التطبيق عند الضغط (يمكن زيادة الصفحات حسب رغبتك)
         max_pages = 3 
 
         with httpx.Client(headers=headers, cookies=cookies, follow_redirects=True, timeout=20.0) as client:
             for page_num in range(1, max_pages + 1):
                 target_url = f"{url}?page={page_num}"
                 response = client.get(target_url)
+                print(f"📡 [DEBUG] طلب الصفحة {page_num} استاب برمز الحالة: {response.status_code}, الرابط النهائي: {response.url}")
+                
                 if response.status_code == 200:
                     soup = BeautifulSoup(response.text, 'html.parser')
                     cards = soup.find_all('article')
                     if not cards:
                         cards = soup.select('div[class*="freight"], tr')
+                    
+                    print(f"🔎 [DEBUG] الصفحة {page_num}: تم العثور على عدد {len(cards)} عنصر بطاقة (Article/Div).")
 
                     for card in cards:
                         text = card.get_text(separator='\n', strip=True)
@@ -108,14 +114,14 @@ def get_live_hareth_loads():
                             if lines not in all_scraped_loads:
                                 all_scraped_loads.append(lines)
 
-        # هيكلة وتصفية الحمولات الحية
+        print(f"📦 [DEBUG] إجمالي الحمولات الخام المستخرجة قبل التصفية: {len(all_scraped_loads)}")
+
         formatted_loads = []
         for idx, lines in enumerate(all_scraped_loads, start=1):
             origin = lines[0] if len(lines) > 0 else "غير محدد"
             destination = lines[1] if len(lines) > 1 else "غير محدد"
             
-            # استخراج المسافة بالكيلموتر بدقة من النصوص
-            distance_km = 300.0 # قيمة افتراضية في حال لم تذكر
+            distance_km = 300.0
             for line in lines:
                 if "km" in line.lower() or "كم" in line:
                     nums = re.findall(r'\d+', line)
@@ -123,11 +129,9 @@ def get_live_hareth_loads():
                         distance_km = float(nums[0])
                         break
 
-            # فلترة جغرافية بسيطة لو طلب حارث حسب مدينته الحالية
             if hareth_city and hareth_city not in origin.lower():
-                continue # تخطي الحمولة إذا لم تكن قريبة من موقع حارث الحالي
+                continue
 
-            # حساب الحد الأدنى للسعر العادل (معامل 1.3 يورو لكل كم + هامش تشغيلي)
             floor_price = round(distance_km * 1.3 * 1.2, 2)
 
             formatted_loads.append({
@@ -141,6 +145,7 @@ def get_live_hareth_loads():
                 "raw_lines": lines
             })
 
+        print(f"✅ [DEBUG] إجمالي الحمولات النهائية بعد التصفية: {len(formatted_loads)}")
         return jsonify({
             "status": "success",
             "driver": "حارث",
@@ -149,13 +154,16 @@ def get_live_hareth_loads():
         }), 200
 
     except Exception as e:
+        print(f"❌ [DEBUG ERROR] حدث استثناء أثناء الجلب: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# مسار استلام وحفظ الكوكيز المرسلة من تطبيق الفلاتر
+# مسار استقبال وحفظ الكوكيز مع التتبع
 @app.route("/api/update-cookies", methods=["POST"])
 def update_cookies():
     try:
         cookies_data = request.get_json()
+        print(f"📥 [DEBUG] تم استلام طلب تحديث الكوكيز من التطبيق. عدد الكوكيز الواردة: {len(cookies_data) if cookies_data else 0}")
+        
         if not cookies_data:
             return jsonify({"status": "error", "message": "No cookies provided"}), 400
         
@@ -166,8 +174,10 @@ def update_cookies():
         with open("session.json", "w", encoding="utf-8") as f:
             json.dump(session_payload, f, ensure_ascii=False, indent=4)
             
+        print("💾 [DEBUG] تم حفظ ملف session.json بنجاح على السيرفر!")
         return jsonify({"status": "success", "message": "Cookies updated successfully"}), 200
     except Exception as e:
+        print(f"❌ [DEBUG ERROR] خطأ أثناء حفظ الكوكيز: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/", methods=["GET"])
