@@ -14,7 +14,7 @@ app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 HARETH_WHATSAPP_NUMBER = "whatsapp:+4917656970147"
 
-# تخزين إحداثيات حارث الحقيقية في الذاكرة المؤقتة (يعمل في أي مكان في أوروبا)
+# تخزين إحداثيات حارث الحقيقية في الذاكرة المؤقتة
 REAL_DRIVER_LOCATION = {
     "lat": 51.1657,
     "lng": 10.4515,
@@ -22,7 +22,7 @@ REAL_DRIVER_LOCATION = {
     "timestamp": "في انتظار أول تحديث حقيقي"
 }
 
-# ذاكرة مؤقتة للمسافات المحسوبة سابقاً لأي مدينة أوروبية لضمان السرعة الصاروخية ومنع الـ 502
+# ذاكرة مؤقتة للمسافات المحسوبة سابقاً لأي مدينة أوروبية لضمان السرعة الصاروخية
 DISTANCE_CACHE = {}
 
 @app.route("/whatsapp", methods=["POST"])
@@ -55,7 +55,7 @@ def whatsapp_webhook():
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=incoming_msg,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
@@ -99,9 +99,8 @@ def get_gps():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# دالة ذكية وعامة لأوروبا تستخدم Gemini مع نظام تخزين مؤقت (Cache) لمنع بطء السيرفر
+# دالة ذكية وعامة لأوروبا تستخدم النموذج الحديث مع نظام تخزين مؤقت آمن
 def get_europe_road_distance(hareth_lat, hareth_lng, origin_text):
-    # تنظيف نص العنوان للبحث في الذاكرة المؤقتة
     cache_key = origin_text.strip().lower()
     if cache_key in DISTANCE_CACHE:
         return DISTANCE_CACHE[cache_key]
@@ -111,7 +110,7 @@ def get_europe_road_distance(hareth_lat, hareth_lng, origin_text):
 
     prompt = (
         f"حارث السائق متواجد في أوروبا عند الإحداثيات (خط العرض {hareth_lat}, خط الطول {hareth_lng}).\n"
-        f"عنوان نقطة التحميل في أي دولة أوروبية هو: '{origin_text}'.\n"
+        f"عنوان نقطة التحميل في أوروبا هو: '{origin_text}'.\n"
         f"باعتبارك خبيراً بجغرافية الطرق الأوروبية، قدر مسافة القيادة الفعلية بالطرق (Road Distance) بالكيلومتر بين موقع حارث ونقطة التحميل.\n"
         f"أجب حصراً برقم صحيح أو عشري يمثل المسافة بالكيلومتر (مثال: 75 أو 340.5)، بدون أي كلمات أو حروف إضافية."
     )
@@ -119,20 +118,19 @@ def get_europe_road_distance(hareth_lat, hareth_lng, origin_text):
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
         )
         if response and response.text:
             clean_nums = re.findall(r'\d+\.?\d*', response.text)
             if clean_nums:
                 dist = float(clean_nums[0])
-                # حفظ النتيجة في الذاكرة المؤقتة لكي لا يتم استدعاء النموذج لهذه المدینة مرة أخرى
                 DISTANCE_CACHE[cache_key] = dist
                 return dist
     except Exception as e:
         print(f"⚠️ EU AI Distance Error: {str(e)}")
 
-    return 100.0  # قيمة احتياطية آمنة
+    return 100.0  # قيمة احتياطية آمنة تمنع الانهيار
 
 # مسار جلب وترتيب الحمولات لعموم أوروبا بناءً على موقع حارث اللحظي
 @app.route("/api/loads", methods=["GET"])
