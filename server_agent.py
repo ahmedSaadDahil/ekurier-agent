@@ -5,13 +5,9 @@ import time
 import httpx
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
-from twilio.twiml.messaging_response import MessagingResponse
-from google import genai
-from google.genai import types
 
 app = Flask(__name__)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 HARETH_WHATSAPP_NUMBER = "whatsapp:+4917656970147"
 
 REAL_DRIVER_LOCATION = {
@@ -25,7 +21,6 @@ SESSION_STORE = {
     "last_login_time": 0
 }
 
-# قاموس إحداثيات المدن الأوروبية الكبرى للسرعة والفلترة
 EU_CITIES_COORDS = {
     "münchen": (48.1351, 11.5820), "munich": (48.1351, 11.5820),
     "ingolstadt": (48.7665, 11.4258),
@@ -87,6 +82,37 @@ EU_CITIES_COORDS = {
     "bonn": (50.7374, 7.0982)
 }
 
+def normalize_url(href):
+    if not href:
+        return None
+    href = href.strip()
+    if href.startswith("javascript:") or href.startswith("#") or href == "":
+        return None
+    if href.startswith("http://") or href.startswith("https://"):
+        return href
+    if href.startswith("/"):
+        return f"https://e-kurier.net{href}"
+    return f"https://e-kurier.net/portal/{href}"
+
+def extract_card_url(card, fallback_url="https://e-kurier.net/portal/freights"):
+    for attr in ["href", "data-href", "data-url"]:
+        norm = normalize_url(card.get(attr))
+        if norm:
+            return norm
+
+    links = card.find_all("a", href=True)
+    for a in links:
+        norm = normalize_url(a.get("href"))
+        if norm and any(k in norm.lower() for k in ["freight", "offer", "detail", "show", "bid", "load"]):
+            return norm
+
+    for a in links:
+        norm = normalize_url(a.get("href"))
+        if norm and "logout" not in norm.lower():
+            return norm
+
+    return fallback_url
+
 def get_active_client():
     current_time = time.time()
     if SESSION_STORE["client"] is not None and (current_time - SESSION_STORE["last_login_time"] < 1800):
@@ -106,17 +132,13 @@ def get_active_client():
         login_page_url = "https://e-kurier.net/portal/login"
         login_page = client.get(login_page_url)
         soup_login = BeautifulSoup(login_page.text, 'html.parser')
-        
+
         form_tag = soup_login.find('form')
         form_action = login_page_url
         if form_tag and form_tag.get('action'):
-            action_attr = form_tag.get('action')
-            if action_attr.startswith('http'):
-                form_action = action_attr
-            elif action_attr.startswith('/'):
-                form_action = f"https://e-kurier.net{action_attr}"
-            else:
-                form_action = f"https://e-kurier.net/portal/{action_attr}"
+            norm_action = normalize_url(form_tag.get('action'))
+            if norm_action:
+                form_action = norm_action
 
         payload = {}
         if form_tag:
@@ -128,8 +150,8 @@ def get_active_client():
 
         payload['email'] = username
         payload['password'] = password
-        
-        login_res = client.post(form_action, data=payload)
+
+        client.post(form_action, data=payload)
         SESSION_STORE["client"] = client
         SESSION_STORE["last_login_time"] = current_time
         return client
@@ -138,31 +160,30 @@ def get_active_client():
         return client
 
 def is_suitable_for_fiat_ducato(card_text):
-    """فلترة صارمة للتأكد أن الحمولة تناسب سيارة Fiat Ducato ولا تتطلب شاحنة ضخمة أو مواصفات غير متوافقة"""
     text_lower = card_text.lower()
-    
-    # 1. استبعاد الشاحنات الثقيلة والتريللات المذكورة صراحة في الإعلان
-    heavy_truck_keywords = ['sattel', 'tautliner', 'lkw', 'semi-trailer', 'mega', 'jumbo', 'aktions-lkw', 'szener']
+    heavy_truck_keywords = [
+        'sattel', 'tautliner', 'lkw', 'semi-trailer',
+        'mega', 'jumbo', 'aktions-lkw', 'szener'
+    ]
     for keyword in heavy_truck_keywords:
         if keyword in text_lower:
-            return False  # مرفوضة لأنها تتطلب شاحنة ضخمة
+            return False
 
-    # 2. فحص الوزن إن وجد (استبعاد ما يزيد عن 1500 كغ لأن طاقة الـ Ducato القصيرة/الطويلة بحدود 1200-1400 كغ)
-    weight_matches = re.findall(r'(\d+[\.,]?\d*)\s*(?:kg|kg\.|تاريخ|كغ)', text_lower)
+    weight_matches = re.findall(r'(\d+[\.,]?\d*)\s*(?:kg|kg\.|كغ)', text_lower)
     for w in weight_matches:
         try:
             w_val = float(w.replace(',', '.'))
-            if w_val > 1600:  # أثقل من طاقة الفان
+            if w_val > 1600:
                 return False
-        except:
+        except Exception:
             pass
 
-    return True  # الحمولة مناسبة وتمر من الفلتر
+    return True
 
 def calculate_fast_road_distance(h_lat, h_lng, card_text):
     target_coords = None
     text_lower = card_text.lower()
-    
+
     for city, coords in EU_CITIES_COORDS.items():
         if city in text_lower:
             target_coords = coords
@@ -173,11 +194,16 @@ def calculate_fast_road_distance(h_lat, h_lng, card_text):
         R = 6371.0
         dlat = math.radians(c_lat - h_lat)
         dlon = math.radians(c_lng - h_lng)
-        a = math.sin(dlat / 2)**2 + math.cos(math.radians(h_lat)) * math.cos(math.radians(c_lat)) * math.sin(dlon / 2)**2
+        a = (
+            math.sin(dlat / 2) ** 2
+            + math.cos(math.radians(h_lat))
+            * math.cos(math.radians(c_lat))
+            * math.sin(dlon / 2) ** 2
+        )
         c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
         road_dist = R * c * 1.25
         return round(road_dist, 1)
-    
+
     return 500.0
 
 @app.route("/api/update-gps", methods=["POST"])
@@ -195,7 +221,11 @@ def update_gps():
 
 @app.route("/api/get-gps", methods=["GET"])
 def get_gps():
-    return jsonify({"status": "success", "driver": "حارث", "location": REAL_DRIVER_LOCATION}), 200
+    return jsonify({
+        "status": "success",
+        "driver": "حارث",
+        "location": REAL_DRIVER_LOCATION
+    }), 200
 
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
@@ -214,11 +244,13 @@ def get_live_hareth_loads():
         client = get_active_client()
         freights_url = "https://e-kurier.net/portal/freights"
 
-        all_scraped_loads = []
+        seen_signatures = set()
+        raw_items = []
+
         for page_num in range(1, 3):
             target_page = f"{freights_url}?page={page_num}"
             response = client.get(target_page)
-            
+
             if "login" in str(response.url).lower():
                 SESSION_STORE["client"] = None
                 client = get_active_client()
@@ -232,19 +264,24 @@ def get_live_hareth_loads():
 
                 for card in cards:
                     text = card.get_text(separator='\n', strip=True)
-                    if len(text) > 15:
-                        # 🛡️ تطبيق فلتر التوافق مع سيارة Fiat Ducato فوراً
-                        if is_suitable_for_fiat_ducato(text):
-                            lines = [line.strip() for line in text.split('\n') if line.strip()]
-                            if lines not in all_scraped_loads:
-                                all_scraped_loads.append(lines)
+                    if len(text) > 15 and is_suitable_for_fiat_ducato(text):
+                        lines = [line.strip() for line in text.split('\n') if line.strip()]
+                        sig = tuple(lines)
+                        if sig not in seen_signatures:
+                            seen_signatures.add(sig)
+                            offer_url = extract_card_url(card, fallback_url=target_page)
+                            raw_items.append({
+                                "lines": lines,
+                                "offer_url": offer_url
+                            })
 
         formatted_loads = []
-        for idx, lines in enumerate(all_scraped_loads, start=1):
+        for idx, item in enumerate(raw_items, start=1):
+            lines = item["lines"]
             full_text = " | ".join(lines)
             origin = lines[0] if len(lines) > 0 else "غير محدد"
             destination = lines[1] if len(lines) > 1 else "غير محدد"
-            
+
             distance_km = 100.0
             for line in lines:
                 if "km" in line.lower() or "كم" in line:
@@ -267,13 +304,13 @@ def get_live_hareth_loads():
                 "hareth_distance_km": hareth_distance,
                 "floor_price": floor_price,
                 "vehicle_match": "Fiat Ducato L4H2",
+                "offer_url": item["offer_url"],
                 "raw_lines": lines
             })
 
         if hareth_lat is not None and hareth_lng is not None:
             formatted_loads.sort(key=lambda x: x['hareth_distance_km'])
 
-        print(f"🚀 [FILTERED SUCCESS] تم فلترة وإرسال {len(formatted_loads)} حمولة متوافقة تماماً مع سيارة حارث!")
         return jsonify({
             "status": "success",
             "driver": "حارث",
@@ -289,7 +326,7 @@ def get_live_hareth_loads():
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Ducato-Filtered Agent Active"})
+    return jsonify({"status": "online", "message": "E-Kurier Direct Offer Link Agent Active"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
