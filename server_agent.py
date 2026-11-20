@@ -25,16 +25,16 @@ DEFAULT_HARETH_HOME_LAT = 50.69470
 DEFAULT_HARETH_HOME_LNG = 11.59367
 DEFAULT_HARETH_HOME_LABEL = "Hareth-Home"
 
-# قائمة موديلات Gemini المحددة في البرمجة (يجربها السيرفر تلقائياً إذا ظهر 404)
+# قائمة موديلات Gemini المحددة في البرمجة (يجربها السيرفر تلقائياً إذا ظهر خطأ 404)
 GEMINI_CANDIDATE_MODELS = list(dict.fromkeys([
     m.strip()
     for m in (
         os.environ.get("GEMINI_MODEL", "")
-        + ",gemini-2.0-flash,gemini-2.0-flash-lite,gemini-1.5-flash-latest,gemini-1.5-flash"
+        + ",gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash,gemini-2.0-flash-lite"
     ).split(",")
     if m.strip()
 ]))
-GEMINI_MODEL = GEMINI_CANDIDATE_MODELS[0] if GEMINI_CANDIDATE_MODELS else "gemini-2.0-flash"
+GEMINI_MODEL = GEMINI_CANDIDATE_MODELS[0] if GEMINI_CANDIDATE_MODELS else "gemini-2.5-flash"
 
 GEMINI_BATCH_SIZE = max(5, min(int(os.environ.get("GEMINI_BATCH_SIZE", "18")), 40))
 AI_CACHE_TTL_SEC = max(15, min(int(os.environ.get("AI_CACHE_TTL_SEC", "120")), 900))
@@ -358,6 +358,9 @@ EU_CITIES_COORDS = {
     "herzebrock-clarholz": (51.8875, 8.2333),
     "bocholt": (51.8333, 6.6167),
     "zossen": (52.2167, 13.4500),
+    "schwandorf": (49.3267, 12.1047),
+    "bruchköbel": (50.1711, 8.9675),
+    "stuhr": (53.0128, 8.7539),
 
     # النمسا
     "wien": (48.2082, 16.3738),
@@ -383,6 +386,7 @@ EU_CITIES_COORDS = {
     "luzern": (47.0502, 8.3093),
     "zuchwil": (47.2089, 7.5628),
     "schlieren": (47.3972, 8.4489),
+    "niederbipp": (47.2667, 7.7000),
 
     # هولندا
     "amsterdam": (52.3676, 4.9041),
@@ -422,7 +426,7 @@ EU_CITIES_COORDS = {
     "bordeaux": (44.8378, -0.5792),
     "lille": (50.6292, 3.0573),
 
-    # إيطاليا
+    # إيطاليا / إسبانيا
     "milano": (45.4642, 9.1900),
     "milan": (45.4642, 9.1900),
     "roma": (41.9028, 12.4964),
@@ -441,6 +445,8 @@ EU_CITIES_COORDS = {
     "palermo": (38.1157, 13.3615),
     "lucera": (41.5075, 15.3350),
     "livigno": (46.5389, 10.1356),
+    "madrid": (40.4168, -3.7038),
+    "las palmas de gran canaria": (28.1235, -15.4363),
 
     # بولندا / التشيك / سلوفاكيا / المجر / رومانيا / السويد
     "warsaw": (52.2297, 21.0122),
@@ -452,8 +458,12 @@ EU_CITIES_COORDS = {
     "brno": (49.1951, 16.6068),
     "zebrak": (49.8756, 13.8894),
     "rokycany": (49.7425, 13.5947),
+    "jablonne nad orlici": (50.0322, 16.6025),
     "bratislava": (48.1486, 17.1077),
     "budapest": (47.4979, 19.0402),
+    "maklár": (47.8764, 20.4339),
+    "maklar": (47.8764, 20.4339),
+    "debrecen": (47.5316, 21.6273),
     "bucharest": (44.4268, 26.1025),
     "sighisoara": (46.2197, 24.7964),
     "uppsala": (59.8586, 17.6389),
@@ -1082,7 +1092,7 @@ def _call_gemini_batch(api_key: str, batch_items: list[dict], driver_loc: dict) 
         "(الحد الأقصى للحمولة 1360 كجم، الأبعاد الداخلية 375x170x195 سم). "
         "تحلل الحمولات المرسلة باللغتين الألمانية والإنجليزية وتعيد JSON فقط دون أي نص إضافي. "
         "لكل حمولة في الدفعة قيّم ملاءمتها العملية، ورتبها من الأفضل للأسوأ لحارث مع مراعاة: "
-        "1) مطابقة الوزن والأبعاد والمركبة فعلياً (وتنبيه إذا كان المعلن كتب أبعاداً غريبة مثل 1200x800x1200 أو 4x2x2 أو لم يذكر الأبعاد أو ذكر وجهة جزيرة بعيدة مثل جزر الكناري/مايوركا). "
+        "1) مطابقة الوزن والأبعاد والمركبة فعلياً (وتنبيه caution إذا كانت الأبعاد غير مذكورة أو غريبة أو إذا كانت الوجهة جزيرة بعيدة مثل جزر الكناري/مايوركا أو المسافة طويلة جداً). "
         "2) القرب من موقع حارث إذا كان متوفراً (hareth_distance_km < 9000) مع الانتباه إلى أن source قد يكون fallback_home (منزل حارث كخيار بديل) وليس live_gps. "
         "3) وضوح المسافة والمواعيد والجدوى."
     )
@@ -1121,41 +1131,42 @@ def _call_gemini_batch(api_key: str, batch_items: list[dict], driver_loc: dict) 
 
     last_err: Exception | None = None
     for model_name in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-        payload = {
-            "system_instruction": {"parts": [{"text": system_instruction}]},
-            "contents": [{"parts": [{"text": json.dumps(user_prompt, ensure_ascii=False)}]}],
-            "generationConfig": {
-                "temperature": 0.2,
-                "responseMimeType": "application/json",
-            },
-        }
-        try:
-            with httpx.Client(timeout=25.0) as client:
-                resp = client.post(url, params={"key": api_key}, json=payload)
-                resp.raise_for_status()
-                body = resp.json()
+        clean_model = model_name.replace("models/", "").strip()
+        for api_ver in ("v1beta", "v1"):
+            url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{clean_model}:generateContent"
+            payload = {
+                "contents": [{"parts": [{"text": f"{system_instruction}\n\n{json.dumps(user_prompt, ensure_ascii=False)}"}]}],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "responseMimeType": "application/json",
+                },
+            }
+            try:
+                with httpx.Client(timeout=25.0) as client:
+                    resp = client.post(url, params={"key": api_key}, json=payload)
+                    resp.raise_for_status()
+                    body = resp.json()
 
-            with _MODEL_LOCK:
-                _ACTIVE_GEMINI_MODEL = model_name
+                with _MODEL_LOCK:
+                    _ACTIVE_GEMINI_MODEL = clean_model
 
-            candidates = body.get("candidates") or []
-            if not candidates:
-                return [], model_name
-            parts = ((candidates[0].get("content") or {}).get("parts")) or []
-            text_out = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
-            parsed = _extract_json_object(text_out)
-            if not parsed or not isinstance(parsed.get("items"), list):
-                return [], model_name
-            return [x for x in parsed["items"] if isinstance(x, dict)], model_name
-        except httpx.HTTPStatusError as e:
-            last_err = e
-            if e.response is not None and e.response.status_code == 404:
-                continue
-            raise
-        except Exception as e:
-            last_err = e
-            raise
+                candidates = body.get("candidates") or []
+                if not candidates:
+                    return [], clean_model
+                parts = ((candidates[0].get("content") or {}).get("parts")) or []
+                text_out = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+                parsed = _extract_json_object(text_out)
+                if not parsed or not isinstance(parsed.get("items"), list):
+                    return [], clean_model
+                return [x for x in parsed["items"] if isinstance(x, dict)], clean_model
+            except httpx.HTTPStatusError as e:
+                last_err = e
+                if e.response is not None and e.response.status_code in (400, 404):
+                    continue
+                raise
+            except Exception as e:
+                last_err = e
+                raise
 
     if last_err:
         raise last_err
@@ -1253,6 +1264,7 @@ def analyze_all_freights_with_gemini(all_audit: list[dict], driver_loc: dict, fo
         enriched["ai_score"] = round(max(0.0, min(100.0, score)), 1)
         enriched["ai_reason_ar"] = reason_ar
         enriched["ai_card_ar"] = card_ar
+        enriched["accepted"] = suit != "unsuitable"
         merged_list.append(enriched)
 
     merged_list.sort(
@@ -1381,8 +1393,6 @@ def get_live_hareth_loads():
                 flush=True,
             )
 
-        all_accepted.sort(key=lambda x: x["hareth_distance_km"])
-
         with _MODEL_LOCK:
             current_model = _ACTIVE_GEMINI_MODEL or GEMINI_MODEL
 
@@ -1392,7 +1402,13 @@ def get_live_hareth_loads():
                 driver_loc=eff_loc,
                 force_refresh=force_refresh,
             )
+            if ai_analysis.get("ranked_loads"):
+                all_audit = list(ai_analysis["ranked_loads"])
+                all_accepted = [
+                    x for x in all_audit if x.get("ai_suitability") != "unsuitable"
+                ]
         else:
+            all_accepted.sort(key=lambda x: x["hareth_distance_km"])
             ai_analysis = {
                 "enabled": False,
                 "status": "disabled_by_query",
@@ -1410,7 +1426,7 @@ def get_live_hareth_loads():
             "pages_scanned": pages_scanned,
             "total_raw_before_filter": len(all_audit),
             "total_fetched": len(all_accepted),
-            "sorted_by": "nearest_to_hareth_location",
+            "sorted_by": "ai_and_nearest_to_hareth_location" if use_ai else "nearest_to_hareth_location",
             "vehicle_specs": {
                 "model": "Fiat Ducato L4H2",
                 "max_payload_kg": MAX_PAYLOAD_KG,
@@ -1537,8 +1553,3 @@ def loads_after_filter():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
-```[cite: 4]
-
-### خطوات التحقق السريعة بعد اللصق والنشر
-* افتح المسار الأساسي `/` وتأكد من أن `location_source` يساوي `"fallback_home"` عند عدم وصول موقع GPS حي، أو `"live_gps"` فور وصول إحداثيات من `/api/update-gps`.
-* اطلب `/api/loads?refresh_ai=1` وتأكد من خلو `ai_analysis.errors` من أخطاء `404` ومن ظهور `ai_analysis.model` الفعّال مع تحليلات `ai_card_ar` و`ai_reason_ar`.
