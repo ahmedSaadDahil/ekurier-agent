@@ -55,6 +55,7 @@ hareth_live_location = {
 _COOKIE_LOCK = threading.Lock()
 _RUNTIME_COOKIE: str | None = None
 _LAST_LOGIN_STATUS: str = "not_attempted"
+_LAST_LOGIN_DEBUG: dict = {}
 
 # ==========================================
 # 3. قاموس إحداثيات المدن الأوروبية وألمانيا
@@ -443,7 +444,7 @@ def _is_login_page(html_text: str) -> bool:
 
 
 def _try_auto_login(client: httpx.Client, login_page_html: str, current_cookie: str) -> str:
-    global _LAST_LOGIN_STATUS
+    global _LAST_LOGIN_STATUS, _LAST_LOGIN_DEBUG
     email = (os.environ.get("EKURIER_USER") or os.environ.get("EKURIER_EMAIL") or "").strip()
     password = (os.environ.get("EKURIER_PASS") or os.environ.get("EKURIER_PASSWORD") or "").strip()
     if not email or not password:
@@ -459,6 +460,7 @@ def _try_auto_login(client: httpx.Client, login_page_html: str, current_cookie: 
     form = soup.find("form")
     action_url = "https://e-kurier.net/login"
     payload: dict[str, str] = {}
+    input_names: list[str] = []
 
     if form:
         act = (form.get("action") or "").strip()
@@ -471,6 +473,7 @@ def _try_auto_login(client: httpx.Client, login_page_html: str, current_cookie: 
             name = (inp.get("name") or "").strip()
             if not name:
                 continue
+            input_names.append(name)
             itype = (inp.get("type") or "").lower()
             val = inp.get("value") or ""
             nlow = name.lower()
@@ -496,8 +499,15 @@ def _try_auto_login(client: httpx.Client, login_page_html: str, current_cookie: 
     if csrf_token:
         post_headers["X-CSRF-TOKEN"] = csrf_token
 
+    _LAST_LOGIN_DEBUG = {
+        "action_url": action_url,
+        "has_csrf": bool(csrf_token),
+        "inputs": input_names,
+    }
+
     try:
         resp = client.post(action_url, data=payload, headers=post_headers)
+        _LAST_LOGIN_DEBUG["post_status"] = resp.status_code
         merged = _merge_cookies_from_client(client, current_cookie)
         if resp.status_code in (200, 302, 303) and not _is_login_page(resp.text or ""):
             _LAST_LOGIN_STATUS = f"ok_{resp.status_code}"
@@ -771,6 +781,7 @@ def get_live_hareth_loads():
     diag = {
         "cookie_configured": bool(cookie_header),
         "auto_login_status": _LAST_LOGIN_STATUS,
+        "login_debug": _LAST_LOGIN_DEBUG,
         "first_page_status": None,
         "first_page_length": 0,
         "first_page_cards": 0,
@@ -786,6 +797,7 @@ def get_live_hareth_loads():
             if _is_login_page(first_resp.text or ""):
                 cookie_header = _try_auto_login(client, first_resp.text or "", cookie_header)
                 diag["auto_login_status"] = _LAST_LOGIN_STATUS
+                diag["login_debug"] = _LAST_LOGIN_DEBUG
                 diag["cookie_configured"] = bool(cookie_header)
                 retry_headers = dict(headers)
                 if cookie_header:
@@ -820,7 +832,7 @@ def get_live_hareth_loads():
                 f"[DIAGNOSTIC] empty loads: status={diag['first_page_status']} "
                 f"len={diag['first_page_length']} cards={diag['first_page_cards']} "
                 f"cookie={diag['cookie_configured']} login={diag['auto_login_status']} "
-                f"samples={diag['sample_cards']!r}",
+                f"debug={diag['login_debug']!r} samples={diag['sample_cards']!r}",
                 flush=True,
             )
 
@@ -876,6 +888,7 @@ def home():
         "gps_active": hareth_live_location.get("lat") is not None,
         "cookie_configured": bool(_get_active_cookie()),
         "auto_login_status": _LAST_LOGIN_STATUS,
+        "login_debug": _LAST_LOGIN_DEBUG,
         "dynamic_cities_count": len(_DYNAMIC_COORDS),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }), 200
