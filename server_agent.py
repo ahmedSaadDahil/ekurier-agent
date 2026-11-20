@@ -443,7 +443,7 @@ def _is_login_page(html_text: str) -> bool:
     )
 
 
-def _try_auto_login(client: httpx.Client, login_page_html: str, current_cookie: str) -> str:
+def _try_auto_login(base_headers: dict[str, str], current_cookie: str) -> str:
     global _LAST_LOGIN_STATUS, _LAST_LOGIN_DEBUG
     email = (os.environ.get("EKURIER_USER") or os.environ.get("EKURIER_EMAIL") or "").strip()
     password = (os.environ.get("EKURIER_PASS") or os.environ.get("EKURIER_PASSWORD") or "").strip()
@@ -451,72 +451,85 @@ def _try_auto_login(client: httpx.Client, login_page_html: str, current_cookie: 
         _LAST_LOGIN_STATUS = "missing_credentials"
         return current_cookie
 
-    soup = BeautifulSoup(login_page_html or "", "html.parser")
-    csrf_token = ""
-    meta_csrf = soup.find("meta", attrs={"name": "csrf-token"})
-    if meta_csrf and meta_csrf.get("content"):
-        csrf_token = meta_csrf["content"].strip()
-
-    form = soup.find("form")
-    action_url = "https://e-kurier.net/login"
-    payload: dict[str, str] = {}
-    input_names: list[str] = []
-
-    if form:
-        act = (form.get("action") or "").strip()
-        if act.startswith("http"):
-            action_url = act
-        elif act.startswith("/"):
-            action_url = f"https://e-kurier.net{act}"
-
-        for inp in form.find_all("input"):
-            name = (inp.get("name") or "").strip()
-            if not name:
-                continue
-            input_names.append(name)
-            itype = (inp.get("type") or "").lower()
-            val = inp.get("value") or ""
-            nlow = name.lower()
-            if itype == "password" or "pass" in nlow:
-                payload[name] = password
-            elif itype == "email" or "mail" in nlow or "login" in nlow or "user" in nlow:
-                payload[name] = email
-            elif "token" in nlow or "csrf" in nlow:
-                payload[name] = val or csrf_token
-            elif itype in ("hidden", "checkbox", "radio"):
-                payload[name] = val
-
-    if not payload:
-        payload = {"email": email, "password": password}
-        if csrf_token:
-            payload["_token"] = csrf_token
-
-    post_headers = {
-        "Referer": "https://e-kurier.net/portal/freights",
-        "Origin": "https://e-kurier.net",
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-    if csrf_token:
-        post_headers["X-CSRF-TOKEN"] = csrf_token
-
-    _LAST_LOGIN_DEBUG = {
-        "action_url": action_url,
-        "has_csrf": bool(csrf_token),
-        "inputs": input_names,
+    login_url = "https://e-kurier.net/login"
+    fresh_headers = {
+        "User-Agent": base_headers.get("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": base_headers.get("Accept-Language", "de,en;q=0.9"),
     }
 
     try:
-        resp = client.post(action_url, data=payload, headers=post_headers)
-        _LAST_LOGIN_DEBUG["post_status"] = resp.status_code
-        merged = _merge_cookies_from_client(client, current_cookie)
-        if resp.status_code in (200, 302, 303) and not _is_login_page(resp.text or ""):
-            _LAST_LOGIN_STATUS = f"ok_{resp.status_code}"
-            return merged
-        _LAST_LOGIN_STATUS = f"failed_{resp.status_code}"
+        with httpx.Client(timeout=15.0, headers=fresh_headers, cookies=httpx.Cookies(), follow_redirects=True) as auth_client:
+            get_resp = auth_client.get(login_url)
+            soup = BeautifulSoup(get_resp.text or "", "html.parser")
+
+            csrf_token = ""
+            meta_csrf = soup.find("meta", attrs={"name": "csrf-token"})
+            if meta_csrf and meta_csrf.get("content"):
+                csrf_token = meta_csrf["content"].strip()
+
+            form = soup.find("form")
+            action_url = login_url
+            payload: dict[str, str] = {}
+            input_names: list[str] = []
+
+            if form:
+                act = (form.get("action") or "").strip()
+                if act.startswith("http"):
+                    action_url = act
+                elif act.startswith("/"):
+                    action_url = f"https://e-kurier.net{act}"
+
+                for inp in form.find_all("input"):
+                    name = (inp.get("name") or "").strip()
+                    if not name:
+                        continue
+                    input_names.append(name)
+                    itype = (inp.get("type") or "").lower()
+                    val = inp.get("value") or ""
+                    nlow = name.lower()
+                    if itype == "password" or "pass" in nlow:
+                        payload[name] = password
+                    elif itype == "email" or "mail" in nlow or "login" in nlow or "user" in nlow:
+                        payload[name] = email
+                    elif "token" in nlow or "csrf" in nlow:
+                        payload[name] = val or csrf_token
+                    elif itype in ("hidden", "checkbox", "radio"):
+                        payload[name] = val
+
+            if not payload:
+                payload = {"email": email, "password": password}
+                if csrf_token:
+                    payload["_token"] = csrf_token
+
+            post_headers = {
+                "Referer": login_url,
+                "Origin": "https://e-kurier.net",
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            if csrf_token:
+                post_headers["X-CSRF-TOKEN"] = csrf_token
+
+            _LAST_LOGIN_DEBUG = {
+                "action_url": action_url,
+                "has_csrf": bool(csrf_token or payload.get("_token")),
+                "inputs": input_names,
+            }
+
+            post_resp = auth_client.post(action_url, data=payload, headers=post_headers)
+            _LAST_LOGIN_DEBUG["post_status"] = post_resp.status_code
+            _LAST_LOGIN_DEBUG["final_url"] = str(post_resp.url)
+
+            merged = _merge_cookies_from_client(auth_client, "")
+            if post_resp.status_code in (200, 302, 303) and not _is_login_page(post_resp.text or ""):
+                _LAST_LOGIN_STATUS = f"ok_{post_resp.status_code}"
+                return merged or current_cookie
+
+            _LAST_LOGIN_STATUS = f"failed_{post_resp.status_code}"
+            return current_cookie
     except Exception as e:
         _LAST_LOGIN_STATUS = f"error:{type(e).__name__}"
-
-    return current_cookie
+        return current_cookie
 
 
 def _normalize_city_name(raw: str) -> str:
@@ -795,7 +808,7 @@ def get_live_hareth_loads():
             first_resp = client.get(first_url)
 
             if _is_login_page(first_resp.text or ""):
-                cookie_header = _try_auto_login(client, first_resp.text or "", cookie_header)
+                cookie_header = _try_auto_login(headers, cookie_header)
                 diag["auto_login_status"] = _LAST_LOGIN_STATUS
                 diag["login_debug"] = _LAST_LOGIN_DEBUG
                 diag["cookie_configured"] = bool(cookie_header)
