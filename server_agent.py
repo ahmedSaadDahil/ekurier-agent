@@ -11,15 +11,26 @@ app = Flask(__name__)
 
 HARETH_WHATSAPP_NUMBER = "whatsapp:+4917656970147"
 
+# مواصفات سيارة حارث المعتمدة (Fiat Ducato L4H2)
+HARETH_VEHICLE_SPECS = {
+    "model": "Fiat Ducato L4H2",
+    "max_payload_kg": 1360.0,
+    "max_payload_tons": 1.36,
+    "cargo_length_cm": 375.0,
+    "cargo_width_cm": 170.0,
+    "wheel_arch_width_cm": 135.0,
+    "wheel_arch_protrusion_cm": 27.0,
+}
+
 REAL_DRIVER_LOCATION = {
     "lat": None,
     "lng": None,
-    "timestamp": "لم يتم استلام موقع GPS من الهاتف بعد"
+    "timestamp": "لم يتم استلام موقع GPS من الهاتف بعد",
 }
 
 SESSION_STORE = {
     "client": None,
-    "last_login_time": 0
+    "last_login_time": 0,
 }
 
 EU_CITIES_COORDS = {
@@ -80,8 +91,15 @@ EU_CITIES_COORDS = {
     "gründau": (50.2167, 9.1333),
     "schwedt": (53.0667, 14.3000),
     "ortenburg": (48.6667, 13.3167),
-    "bonn": (50.7374, 7.0982)
+    "bonn": (50.7374, 7.0982),
 }
+
+
+def _parse_number(num_str: str):
+    try:
+        return float(num_str.replace(" ", "").replace(",", "."))
+    except Exception:
+        return None
 
 
 def normalize_url(href):
@@ -106,7 +124,10 @@ def extract_card_url(card, fallback_url="https://e-kurier.net/portal/freights"):
     links = card.find_all("a", href=True)
     for a in links:
         norm = normalize_url(a.get("href"))
-        if norm and any(k in norm.lower() for k in ["freight", "offer", "detail", "show", "bid", "load"]):
+        if norm and any(
+            k in norm.lower()
+            for k in ["freight", "offer", "detail", "show", "bid", "load"]
+        ):
             return norm
 
     for a in links:
@@ -119,41 +140,47 @@ def extract_card_url(card, fallback_url="https://e-kurier.net/portal/freights"):
 
 def get_active_client():
     current_time = time.time()
-    if SESSION_STORE["client"] is not None and (current_time - SESSION_STORE["last_login_time"] < 1800):
+    if (
+        SESSION_STORE["client"] is not None
+        and (current_time - SESSION_STORE["last_login_time"] < 1800)
+    ):
         return SESSION_STORE["client"]
 
     username = os.environ.get("EKURIER_USER", "")
     password = os.environ.get("EKURIER_PASS", "")
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5"
+        "Accept-Language": "en-US,en;q=0.5",
     }
 
     client = httpx.Client(headers=headers, follow_redirects=True, timeout=30.0)
     try:
         login_page_url = "https://e-kurier.net/portal/login"
         login_page = client.get(login_page_url)
-        soup_login = BeautifulSoup(login_page.text, 'html.parser')
+        soup_login = BeautifulSoup(login_page.text, "html.parser")
 
-        form_tag = soup_login.find('form')
+        form_tag = soup_login.find("form")
         form_action = login_page_url
-        if form_tag and form_tag.get('action'):
-            norm_action = normalize_url(form_tag.get('action'))
+        if form_tag and form_tag.get("action"):
+            norm_action = normalize_url(form_tag.get("action"))
             if norm_action:
                 form_action = norm_action
 
         payload = {}
         if form_tag:
-            for input_tag in form_tag.find_all('input'):
-                name = input_tag.get('name')
-                value = input_tag.get('value', '')
+            for input_tag in form_tag.find_all("input"):
+                name = input_tag.get("name")
+                value = input_tag.get("value", "")
                 if name:
                     payload[name] = value
 
-        payload['email'] = username
-        payload['password'] = password
+        payload["email"] = username
+        payload["password"] = password
 
         client.post(form_action, data=payload)
         SESSION_STORE["client"] = client
@@ -166,69 +193,141 @@ def get_active_client():
 
 def is_suitable_for_fiat_ducato(card_text):
     text_lower = card_text.lower()
+    max_kg = HARETH_VEHICLE_SPECS["max_payload_kg"]
+
     heavy_truck_keywords = [
-        'sattel', 'tautliner', 'lkw', 'semi-trailer',
-        'mega', 'jumbo', 'aktions-lkw', 'szener'
+        "sattel",
+        "tautliner",
+        "lkw",
+        "semi-trailer",
+        "mega",
+        "jumbo",
+        "aktions-lkw",
+        "szener",
+        "7.5t",
+        "7,5t",
+        "12t",
+        "18t",
+        "40t",
     ]
     for keyword in heavy_truck_keywords:
         if keyword in text_lower:
             return False
 
-    weight_matches = re.findall(r'(\d+[\.,]?\d*)\s*(?:kg|kg\.|كغ)', text_lower)
-    for w in weight_matches:
-        try:
-            w_val = float(w.replace(',', '.'))
-            if w_val > 1600:
+    # فحص الأوزان بالكيلوغرام (kg / كغ)
+    kg_matches = re.findall(
+        r"(\d+(?:[\s\.,]\d+)?)\s*(?:kg|kg\.|kilogramm|كغ|كيلو)",
+        text_lower,
+    )
+    for w in kg_matches:
+        val_kg = _parse_number(w)
+        if val_kg is not None and val_kg > max_kg:
+            return False
+
+    # فحص الأوزان بالأطنان (t / ton / tonnes / tonnen / طن)
+    ton_matches = re.findall(
+        r"(\d+(?:[\s\.,]\d+)?)\s*(?:t\b|ton\b|tons\b|tonne\b|tonnen\b|طن\b|أطنان\b)",
+        text_lower,
+    )
+    for w in ton_matches:
+        val_tons = _parse_number(w)
+        if val_tons is not None:
+            val_kg = val_tons * 1000.0
+            if val_kg > max_kg:
                 return False
-        except Exception:
-            pass
+
+    # فحص الأبعاد إذا ذُكرت صراحةً بالسم أو المتر مع كلمات الطول أو العرض
+    max_len_cm = HARETH_VEHICLE_SPECS["cargo_length_cm"]
+    max_wid_cm = HARETH_VEHICLE_SPECS["cargo_width_cm"]
+
+    for m in re.finditer(
+        r"(?:länge|length|طول)[^\d]{0,12}(\d+(?:[\.,]\d+)?)\s*(cm|m)\b",
+        text_lower,
+    ):
+        val = _parse_number(m.group(1))
+        unit = m.group(2)
+        if val is not None:
+            cm_val = val * 100.0 if unit == "m" else val
+            if cm_val > max_len_cm:
+                return False
+
+    for m in re.finditer(
+        r"(?:breite|width|عرض)[^\d]{0,12}(\d+(?:[\.,]\d+)?)\s*(cm|m)\b",
+        text_lower,
+    ):
+        val = _parse_number(m.group(1))
+        unit = m.group(2)
+        if val is not None:
+            cm_val = val * 100.0 if unit == "m" else val
+            if cm_val > max_wid_cm:
+                return False
 
     return True
 
 
-def calculate_fast_road_distance(h_lat, h_lng, lines):
-    ordered_texts = []
+def _extract_city_coords(lines):
+    candidates = []
     if lines:
-        ordered_texts.append(lines[0].lower())
-        ordered_texts.append(" ".join(lines[:2]).lower())
-    ordered_texts.append(" ".join(lines).lower())
+        candidates.append(lines[0].lower())
+        if len(lines) > 1:
+            candidates.append(" ".join(lines[:2]).lower())
+    candidates.append(" ".join(lines).lower())
 
-    target_coords = None
-    for candidate_text in ordered_texts:
-        for city, coords in EU_CITIES_COORDS.items():
-            if city in candidate_text:
-                target_coords = coords
-                break
-        if target_coords:
-            break
+    for text_block in candidates:
+        for city, coords in sorted(
+            EU_CITIES_COORDS.items(), key=lambda x: len(x[0]), reverse=True
+        ):
+            if re.search(rf"(?<![a-zäöüß]){re.escape(city)}(?![a-zäöüß])", text_block):
+                return coords
+    return None
 
-    if target_coords:
-        c_lat, c_lng = target_coords
-        R = 6371.0
-        dlat = math.radians(c_lat - h_lat)
-        dlon = math.radians(c_lng - h_lng)
-        a = (
-            math.sin(dlat / 2) ** 2
-            + math.cos(math.radians(h_lat))
-            * math.cos(math.radians(c_lat))
-            * math.sin(dlon / 2) ** 2
-        )
-        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-        road_dist = R * c * 1.25
-        return round(road_dist, 1)
 
-    return 9999.0
+def calculate_fast_road_distance(h_lat, h_lng, lines):
+    target_coords = _extract_city_coords(lines)
+    if target_coords is None:
+        return 9999.0
+
+    c_lat, c_lng = target_coords
+    R = 6371.0
+    dlat = math.radians(c_lat - h_lat)
+    dlon = math.radians(c_lng - h_lng)
+
+    lat1_rad = math.radians(h_lat)
+    lat2_rad = math.radians(c_lat)
+
+    a = (
+        math.sin(dlat / 2.0) ** 2
+        + math.cos(lat1_rad) * math.cos(lat2_rad) * (math.sin(dlon / 2.0) ** 2)
+    )
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
+    road_dist = R * c * 1.25
+    return round(road_dist, 1)
+
+
+def _extract_route_distance_km(lines):
+    for line in lines:
+        line_lower = line.lower()
+        if "km" in line_lower or "كم" in line_lower:
+            m = re.search(
+                r"(\d+(?:[\s\.,]\d+)?)\s*(?:km|كم)",
+                line_lower,
+            )
+            if m:
+                val = _parse_number(m.group(1))
+                if val is not None and val > 0:
+                    return round(val, 1)
+    return 100.0
 
 
 @app.route("/api/update-gps", methods=["POST"])
 def update_gps():
     try:
         data = request.get_json()
-        if data and 'lat' in data and 'lng' in data:
-            REAL_DRIVER_LOCATION['lat'] = float(data['lat'])
-            REAL_DRIVER_LOCATION['lng'] = float(data['lng'])
-            REAL_DRIVER_LOCATION['timestamp'] = data.get(
-                'timestamp', datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if data and "lat" in data and "lng" in data:
+            REAL_DRIVER_LOCATION["lat"] = float(data["lat"])
+            REAL_DRIVER_LOCATION["lng"] = float(data["lng"])
+            REAL_DRIVER_LOCATION["timestamp"] = data.get(
+                "timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             )
             return jsonify({"status": "success", "location": REAL_DRIVER_LOCATION}), 200
         return jsonify({"status": "error", "message": "بيانات غير صالحة"}), 400
@@ -241,25 +340,25 @@ def get_gps():
     return jsonify({
         "status": "success",
         "driver": "حارث",
-        "location": REAL_DRIVER_LOCATION
+        "location": REAL_DRIVER_LOCATION,
     }), 200
 
 
 @app.route("/api/loads", methods=["GET"])
 def get_live_hareth_loads():
     try:
-        req_lat = request.args.get('lat', type=float)
-        req_lng = request.args.get('lng', type=float)
-        max_distance_km = request.args.get('max_km', type=float)
+        req_lat = request.args.get("lat", type=float)
+        req_lng = request.args.get("lng", type=float)
+        max_distance_km = request.args.get("max_km", type=float)
 
         if req_lat is not None and req_lng is not None:
             hareth_lat, hareth_lng = req_lat, req_lng
-            REAL_DRIVER_LOCATION['lat'] = hareth_lat
-            REAL_DRIVER_LOCATION['lng'] = hareth_lng
-            REAL_DRIVER_LOCATION['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            REAL_DRIVER_LOCATION["lat"] = hareth_lat
+            REAL_DRIVER_LOCATION["lng"] = hareth_lng
+            REAL_DRIVER_LOCATION["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         else:
-            hareth_lat = REAL_DRIVER_LOCATION.get('lat')
-            hareth_lng = REAL_DRIVER_LOCATION.get('lng')
+            hareth_lat = REAL_DRIVER_LOCATION.get("lat")
+            hareth_lng = REAL_DRIVER_LOCATION.get("lng")
 
         client = get_active_client()
         freights_url = "https://e-kurier.net/portal/freights"
@@ -277,22 +376,24 @@ def get_live_hareth_loads():
                 response = client.get(target_page)
 
             if response.status_code == 200 and "login" not in str(response.url).lower():
-                soup = BeautifulSoup(response.text, 'html.parser')
-                cards = soup.find_all('article')
+                soup = BeautifulSoup(response.text, "html.parser")
+                cards = soup.find_all("article")
                 if not cards:
-                    cards = soup.select('div[class*="freight"], tr, div[class*="card"], li[class*="load"]')
+                    cards = soup.select(
+                        'div[class*="freight"], tr, div[class*="card"], li[class*="load"]'
+                    )
 
                 for card in cards:
-                    text = card.get_text(separator='\n', strip=True)
+                    text = card.get_text(separator="\n", strip=True)
                     if len(text) > 15 and is_suitable_for_fiat_ducato(text):
-                        lines = [line.strip() for line in text.split('\n') if line.strip()]
+                        lines = [line.strip() for line in text.split("\n") if line.strip()]
                         sig = tuple(lines)
                         if sig not in seen_signatures:
                             seen_signatures.add(sig)
                             offer_url = extract_card_url(card, fallback_url=target_page)
                             raw_items.append({
                                 "lines": lines,
-                                "offer_url": offer_url
+                                "offer_url": offer_url,
                             })
 
         formatted_loads = []
@@ -301,16 +402,12 @@ def get_live_hareth_loads():
             origin = lines[0] if len(lines) > 0 else "غير محدد"
             destination = lines[1] if len(lines) > 1 else "غير محدد"
 
-            distance_km = 100.0
-            for line in lines:
-                if "km" in line.lower() or "كم" in line:
-                    nums = re.findall(r'\d+', line)
-                    if nums:
-                        distance_km = float(nums[0])
-                        break
+            distance_km = _extract_route_distance_km(lines)
 
             if hareth_lat is not None and hareth_lng is not None:
-                hareth_distance = calculate_fast_road_distance(hareth_lat, hareth_lng, lines)
+                hareth_distance = calculate_fast_road_distance(
+                    hareth_lat, hareth_lng, lines
+                )
             else:
                 hareth_distance = 9999.0
 
@@ -326,21 +423,23 @@ def get_live_hareth_loads():
                 "distance_km": distance_km,
                 "hareth_distance_km": hareth_distance,
                 "floor_price": floor_price,
-                "vehicle_match": "Fiat Ducato L4H2",
+                "max_payload_kg": HARETH_VEHICLE_SPECS["max_payload_kg"],
+                "vehicle_match": HARETH_VEHICLE_SPECS["model"],
                 "offer_url": item["offer_url"],
-                "raw_lines": lines
+                "raw_lines": lines,
             })
 
-        formatted_loads.sort(key=lambda x: x['hareth_distance_km'])
+        formatted_loads.sort(key=lambda x: x["hareth_distance_km"])
 
         return jsonify({
             "status": "success",
             "driver": "حارث",
+            "vehicle_specs": HARETH_VEHICLE_SPECS,
             "gps_active": hareth_lat is not None and hareth_lng is not None,
             "driver_location": REAL_DRIVER_LOCATION,
             "sorted_by": "nearest_to_hareth_live_gps",
             "total_fetched": len(formatted_loads),
-            "loads": formatted_loads
+            "loads": formatted_loads,
         }), 200
 
     except Exception as e:
@@ -350,7 +449,11 @@ def get_live_hareth_loads():
 
 @app.route("/", methods=["GET"])
 def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Live-GPS & Ducato Agent Active"})
+    return jsonify({
+        "status": "online",
+        "message": "E-Kurier Live-GPS & Ducato Agent Active",
+        "vehicle_specs": HARETH_VEHICLE_SPECS,
+    }), 200
 
 
 if __name__ == "__main__":
