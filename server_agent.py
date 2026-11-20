@@ -609,3 +609,117 @@ def get_live_hareth_loads():
                 pages_scanned += 1
                 accepted, audit = parse_freights_html(resp.text, lookups_remaining=lookups_remaining)
                 if not audit:
+                    break
+                all_accepted.extend(accepted)
+                all_audit.extend(audit)
+
+        all_accepted.sort(key=lambda x: x["hareth_distance_km"])
+
+        payload = {
+            "status": "success",
+            "driver": "حارث",
+            "gps_active": hareth_live_location.get("lat") is not None,
+            "driver_location": hareth_live_location,
+            "pages_scanned": pages_scanned,
+            "total_raw_before_filter": len(all_audit),
+            "total_fetched": len(all_accepted),
+            "sorted_by": "nearest_to_hareth_live_gps",
+            "vehicle_specs": {
+                "model": "Fiat Ducato L4H2",
+                "max_payload_kg": MAX_PAYLOAD_KG,
+                "max_payload_tons": MAX_PAYLOAD_KG / 1000.0,
+                "cargo_length_cm": MAX_LENGTH_CM,
+                "cargo_width_cm": MAX_WIDTH_CM,
+                "max_height_cm": MAX_HEIGHT_CM,
+            },
+            "loads": all_accepted,
+            "audit_comparison": all_audit,
+        }
+        return jsonify(payload), 200
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+        }), 500
+
+
+@app.route("/", methods=["GET", "HEAD"])
+def home():
+    return jsonify({
+        "status": "online",
+        "service": "eKurier Hareth Agent",
+        "gps_active": hareth_live_location.get("lat") is not None,
+        "dynamic_cities_count": len(_DYNAMIC_COORDS),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }), 200
+
+
+@app.route("/api/update-gps", methods=["POST"])
+def update_gps():
+    data = request.get_json(silent=True) or {}
+    lat = data.get("lat")
+    lng = data.get("lng")
+    if lat is None or lng is None:
+        return jsonify({"status": "error", "message": "lat and lng are required"}), 400
+
+    hareth_live_location["lat"] = float(lat)
+    hareth_live_location["lng"] = float(lng)
+    hareth_live_location["accuracy"] = data.get("accuracy")
+    hareth_live_location["speed"] = data.get("speed")
+    hareth_live_location["device"] = data.get("device", "Hareth-Device")
+    hareth_live_location["timestamp"] = data.get("timestamp") or datetime.now(timezone.utc).isoformat()
+
+    return jsonify({
+        "status": "success",
+        "location": hareth_live_location,
+    }), 200
+
+
+@app.route("/api/get-gps", methods=["GET"])
+def get_gps():
+    return jsonify({
+        "status": "success",
+        "location": hareth_live_location,
+    }), 200
+
+
+@app.route("/api/loads", methods=["GET"])
+def api_loads():
+    return get_live_hareth_loads()
+
+
+@app.route("/api/loads/before-filter", methods=["GET"])
+def loads_before_filter():
+    resp, code = get_live_hareth_loads()
+    if code != 200:
+        return resp, code
+    payload = resp.get_json() or {}
+    items = payload.get("audit_comparison", [])
+    return jsonify({
+        "status": "success",
+        "stage": "before_filter",
+        "pages_scanned": payload.get("pages_scanned", 0),
+        "total": len(items),
+        "items": items,
+    }), 200
+
+
+@app.route("/api/loads/after-filter", methods=["GET"])
+def loads_after_filter():
+    resp, code = get_live_hareth_loads()
+    if code != 200:
+        return resp, code
+    payload = resp.get_json() or {}
+    items = payload.get("loads", [])
+    return jsonify({
+        "status": "success",
+        "stage": "after_filter",
+        "pages_scanned": payload.get("pages_scanned", 0),
+        "total": len(items),
+        "items": items,
+    }), 200
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
