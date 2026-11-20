@@ -41,7 +41,7 @@ UNLOADING_LABELS = {
 }
 
 # ==========================================
-# 2. تخزين موقع حارث الحي في الذاكرة
+# 2. تخزين موقع حارث الحي والكوكي في الذاكرة
 # ==========================================
 hareth_live_location = {
     "lat": None,
@@ -51,6 +51,10 @@ hareth_live_location = {
     "speed": None,
     "device": "Hareth-Device"
 }
+
+_COOKIE_LOCK = threading.Lock()
+_RUNTIME_COOKIE: str | None = None
+_LAST_LOGIN_STATUS: str = "not_attempted"
 
 # ==========================================
 # 3. قاموس إحداثيات المدن الأوروبية وألمانيا
@@ -387,6 +391,124 @@ def _clean_cookie_value(raw_cookie: str) -> str:
     return cleaned
 
 
+def _get_active_cookie() -> str:
+    with _COOKIE_LOCK:
+        if _RUNTIME_COOKIE:
+            return _RUNTIME_COOKIE
+    return _clean_cookie_value(os.environ.get("EKURIER_COOKIE", ""))
+
+
+def _set_runtime_cookie(new_cookie: str) -> str:
+    global _RUNTIME_COOKIE
+    cleaned = _clean_cookie_value(new_cookie)
+    with _COOKIE_LOCK:
+        _RUNTIME_COOKIE = cleaned
+    return cleaned
+
+
+def _merge_cookies_from_client(client: httpx.Client, current_cookie: str) -> str:
+    jar_pairs = []
+    seen = set()
+    for c in client.cookies.jar:
+        if c.name and c.value is not None:
+            jar_pairs.append((c.name, c.value))
+            seen.add(c.name)
+
+    existing_parts = []
+    if current_cookie:
+        for part in current_cookie.split(";"):
+            p = part.strip()
+            if not p or "=" not in p:
+                continue
+            k = p.split("=", 1)[0].strip()
+            if k not in seen:
+                existing_parts.append(p)
+
+    for name, val in jar_pairs:
+        existing_parts.append(f"{name}={val}")
+
+    merged = "; ".join(existing_parts)
+    if merged:
+        _set_runtime_cookie(merged)
+    return merged
+
+
+def _is_login_page(html_text: str) -> bool:
+    low = (html_text or "").lower()
+    return (
+        ("e-mail" in low or "email" in low)
+        and ("passwort" in low or "password" in low)
+        and ("anmelden" in low or "login" in low)
+    )
+
+
+def _try_auto_login(client: httpx.Client, login_page_html: str, current_cookie: str) -> str:
+    global _LAST_LOGIN_STATUS
+    email = (os.environ.get("EKURIER_EMAIL") or "").strip()
+    password = (os.environ.get("EKURIER_PASSWORD") or "").strip()
+    if not email or not password:
+        _LAST_LOGIN_STATUS = "missing_credentials"
+        return current_cookie
+
+    soup = BeautifulSoup(login_page_html or "", "html.parser")
+    csrf_token = ""
+    meta_csrf = soup.find("meta", attrs={"name": "csrf-token"})
+    if meta_csrf and meta_csrf.get("content"):
+        csrf_token = meta_csrf["content"].strip()
+
+    form = soup.find("form")
+    action_url = "https://e-kurier.net/login"
+    payload: dict[str, str] = {}
+
+    if form:
+        act = (form.get("action") or "").strip()
+        if act.startswith("http"):
+            action_url = act
+        elif act.startswith("/"):
+            action_url = f"https://e-kurier.net{act}"
+
+        for inp in form.find_all("input"):
+            name = (inp.get("name") or "").strip()
+            if not name:
+                continue
+            itype = (inp.get("type") or "").lower()
+            val = inp.get("value") or ""
+            nlow = name.lower()
+            if itype == "password" or "pass" in nlow:
+                payload[name] = password
+            elif itype == "email" or "mail" in nlow or "login" in nlow or "user" in nlow:
+                payload[name] = email
+            elif "token" in nlow or "csrf" in nlow:
+                payload[name] = val or csrf_token
+            elif itype in ("hidden", "checkbox", "radio"):
+                payload[name] = val
+
+    if not payload:
+        payload = {"email": email, "password": password}
+        if csrf_token:
+            payload["_token"] = csrf_token
+
+    post_headers = {
+        "Referer": "https://e-kurier.net/portal/freights",
+        "Origin": "https://e-kurier.net",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    if csrf_token:
+        post_headers["X-CSRF-TOKEN"] = csrf_token
+
+    try:
+        resp = client.post(action_url, data=payload, headers=post_headers)
+        merged = _merge_cookies_from_client(client, current_cookie)
+        if resp.status_code in (200, 302, 303) and not _is_login_page(resp.text or ""):
+            _LAST_LOGIN_STATUS = f"ok_{resp.status_code}"
+            return merged
+        _LAST_LOGIN_STATUS = f"failed_{resp.status_code}"
+    except Exception as e:
+        _LAST_LOGIN_STATUS = f"error:{type(e).__name__}"
+
+    return current_cookie
+
+
 def _normalize_city_name(raw: str) -> str:
     s = (raw or "").strip().lower()
     s = re.sub(r"\b[a-z]{1,3}[-\s]?\d[\d\w\*]*\b", " ", s, flags=re.IGNORECASE)
@@ -633,7 +755,7 @@ def get_live_hareth_loads():
     max_pages = int(request.args.get("max_pages", "10"))
     max_pages = max(1, min(max_pages, 15))
 
-    cookie_header = _clean_cookie_value(os.environ.get("EKURIER_COOKIE", ""))
+    cookie_header = _get_active_cookie()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -648,6 +770,7 @@ def get_live_hareth_loads():
     lookups_remaining = [5]
     diag = {
         "cookie_configured": bool(cookie_header),
+        "auto_login_status": _LAST_LOGIN_STATUS,
         "first_page_status": None,
         "first_page_length": 0,
         "first_page_cards": 0,
@@ -657,9 +780,20 @@ def get_live_hareth_loads():
 
     try:
         with httpx.Client(timeout=15.0, headers=headers, follow_redirects=True) as client:
+            first_url = "https://e-kurier.net/portal/freights?page=1"
+            first_resp = client.get(first_url)
+
+            if _is_login_page(first_resp.text or ""):
+                cookie_header = _try_auto_login(client, first_resp.text or "", cookie_header)
+                diag["auto_login_status"] = _LAST_LOGIN_STATUS
+                diag["cookie_configured"] = bool(cookie_header)
+                retry_headers = dict(headers)
+                if cookie_header:
+                    retry_headers["Cookie"] = cookie_header
+                first_resp = client.get(first_url, headers=retry_headers)
+
             for page in range(1, max_pages + 1):
-                url = f"https://e-kurier.net/portal/freights?page={page}"
-                resp = client.get(url)
+                resp = first_resp if page == 1 else client.get(f"https://e-kurier.net/portal/freights?page={page}")
                 if page == 1:
                     diag["first_page_status"] = resp.status_code
                     diag["first_page_length"] = len(resp.text or "")
@@ -685,7 +819,8 @@ def get_live_hareth_loads():
             print(
                 f"[DIAGNOSTIC] empty loads: status={diag['first_page_status']} "
                 f"len={diag['first_page_length']} cards={diag['first_page_cards']} "
-                f"cookie={diag['cookie_configured']} samples={diag['sample_cards']!r}",
+                f"cookie={diag['cookie_configured']} login={diag['auto_login_status']} "
+                f"samples={diag['sample_cards']!r}",
                 flush=True,
             )
 
@@ -720,12 +855,27 @@ def get_live_hareth_loads():
         }), 500
 
 
+@app.route("/api/update-cookie", methods=["POST"])
+def update_cookie():
+    data = request.get_json(silent=True) or {}
+    raw_cookie = data.get("cookie") or request.form.get("cookie") or ""
+    cleaned = _set_runtime_cookie(raw_cookie)
+    if not cleaned:
+        return jsonify({"status": "error", "message": "cookie is required"}), 400
+    return jsonify({
+        "status": "success",
+        "cookie_length": len(cleaned),
+    }), 200
+
+
 @app.route("/", methods=["GET", "HEAD"])
 def home():
     return jsonify({
         "status": "online",
         "service": "eKurier Hareth Agent",
         "gps_active": hareth_live_location.get("lat") is not None,
+        "cookie_configured": bool(_get_active_cookie()),
+        "auto_login_status": _LAST_LOGIN_STATUS,
         "dynamic_cities_count": len(_DYNAMIC_COORDS),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }), 200
