@@ -27,6 +27,9 @@ HEAVY_TRUCK_KEYWORDS = [
     "lkw", "truck", "شاحنة", "تريلا", "مقطورة"
 ]
 
+LOADING_LABELS = {"loading", "loading:", "beladung", "beladung:", "laden", "laden:", "abholung", "abholung:"}
+UNLOADING_LABELS = {"unloading", "unloading:", "entladung", "entladung:", "entladen", "entladen:", "zustellung", "zustellung:"}
+
 # ==========================================
 # 2. تخزين موقع حارث الحي في الذاكرة
 # ==========================================
@@ -505,6 +508,11 @@ def evaluate_load_for_ducato(load_text: str):
     return True, "مناسب لـ Fiat Ducato L4H2"
 
 
+def _has_route_markers(text_lower: str) -> bool:
+    markers = ("loading", "unloading", "beladung", "entladung", "laden", "entladen", "abholung", "zustellung")
+    return any(m in text_lower for m in markers)
+
+
 def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = None):
     soup = BeautifulSoup(html_text, "html.parser")
     raw_items = []
@@ -524,7 +532,7 @@ def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = No
             continue
 
         joined_text = " | ".join(lines)
-        if "loading" not in joined_text.lower() and "unloading" not in joined_text.lower():
+        if not _has_route_markers(joined_text.lower()):
             continue
 
         idx += 1
@@ -532,9 +540,9 @@ def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = No
         destination = "غير محدد"
         for i, line in enumerate(lines):
             low = line.lower()
-            if low in ("loading", "loading:") and i + 1 < len(lines):
+            if low in LOADING_LABELS and i + 1 < len(lines):
                 origin = lines[i + 1]
-            elif low in ("unloading", "unloading:") and i + 1 < len(lines):
+            elif low in UNLOADING_LABELS and i + 1 < len(lines):
                 destination = lines[i + 1]
 
         dist_match = re.search(r'(\d+(?:[.,]\d+)?)\s*km', joined_text.lower())
@@ -590,6 +598,7 @@ def get_live_hareth_loads():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "de,en;q=0.9",
     }
     if cookie_header:
         headers["Cookie"] = cookie_header
