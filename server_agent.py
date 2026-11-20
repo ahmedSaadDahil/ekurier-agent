@@ -25,12 +25,12 @@ DEFAULT_HARETH_HOME_LAT = 50.69470
 DEFAULT_HARETH_HOME_LNG = 11.59367
 DEFAULT_HARETH_HOME_LABEL = "Hareth-Home"
 
-# قائمة موديلات Gemini المحددة في البرمجة (يجربها السيرفر تلقائياً إذا ظهر خطأ 404)
+# قائمة موديلات Gemini المحددة في البرمجة (يجربها السيرفر تلقائياً إذا ظهر خطأ 404/400)
 GEMINI_CANDIDATE_MODELS = list(dict.fromkeys([
     m.strip()
     for m in (
         os.environ.get("GEMINI_MODEL", "")
-        + ",gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash,gemini-2.0-flash-lite"
+        + ",gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash"
     ).split(",")
     if m.strip()
 ]))
@@ -682,7 +682,7 @@ def _geocode_city_lightweight(city_query: str) -> tuple[float, float] | None:
         "limit": 1,
     }
     try:
-        with httpx.Client(timeout=2.0, headers=headers) as client:
+        with httpx.Client(timeout=2.5, headers=headers) as client:
             resp = client.get("https://nominatim.openstreetmap.org/search", params=params)
             if resp.status_code != 200:
                 return None
@@ -740,11 +740,11 @@ def extract_city_coords(location_text: str, lookups_remaining: list[int] | None 
         return None
     lower = location_text.lower()
     for city_name, coords in EU_CITIES_COORDS.items():
-        if city_name in lower:
+        if re.search(rf"(?<!\w){re.escape(city_name)}(?!\w)", lower):
             return coords
     with _GEO_LOCK:
         for city_name, coords in _DYNAMIC_COORDS.items():
-            if city_name in lower:
+            if re.search(rf"(?<!\w){re.escape(city_name)}(?!\w)", lower):
                 return coords
     return resolve_city_coords(location_text, lookups_remaining=lookups_remaining)
 
@@ -788,7 +788,12 @@ def parse_weight_to_kg(text: str, lines: list[str] | None = None):
             low = ln.lower().strip()
             if any(noise in low for noise in UI_NOISE_PHRASES):
                 continue
-            if any(m in low for m in CARGO_SECTION_MARKERS) or "•" in ln or "|" in ln or re.search(r"\b(?:kg|ton(?:nen|s)?|t|كجم|كيلو|طن)\b", low):
+            if (
+                any(m in low for m in CARGO_SECTION_MARKERS)
+                or "•" in ln
+                or "|" in ln
+                or re.search(r"\b(?:kg|ton(?:nen|s)?|t|كجم|كيلو|طن)\b", low)
+            ):
                 cleaned_ln = _strip_vehicle_class_weights(ln)
                 if cleaned_ln.strip():
                     candidate_lines.append(cleaned_ln)
@@ -1132,6 +1137,8 @@ def _call_gemini_batch(api_key: str, batch_items: list[dict], driver_loc: dict) 
     last_err: Exception | None = None
     for model_name in models_to_try:
         clean_model = model_name.replace("models/", "").strip()
+        if not clean_model:
+            continue
         for api_ver in ("v1beta", "v1"):
             url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{clean_model}:generateContent"
             payload = {
@@ -1161,12 +1168,13 @@ def _call_gemini_batch(api_key: str, batch_items: list[dict], driver_loc: dict) 
                 return [x for x in parsed["items"] if isinstance(x, dict)], clean_model
             except httpx.HTTPStatusError as e:
                 last_err = e
-                if e.response is not None and e.response.status_code in (400, 404):
+                status_code = e.response.status_code if e.response is not None else None
+                if status_code in (400, 404):
                     continue
                 raise
             except Exception as e:
                 last_err = e
-                raise
+                continue
 
     if last_err:
         raise last_err
@@ -1230,7 +1238,7 @@ def analyze_all_freights_with_gemini(all_audit: list[dict], driver_loc: dict, fo
                 if iid:
                     ai_by_key[f"id:{iid}"] = r
         except Exception as e:
-            batch_errors.append(f"{type(e).__name__}: {str(e)[:120]}")
+            batch_errors.append(f"{type(e).__name__}: {str(e)[:160]}")
 
     suitability_rank = {"recommended": 0, "caution": 1, "unsuitable": 2}
     merged_list: list[dict] = []
@@ -1240,12 +1248,18 @@ def analyze_all_freights_with_gemini(all_audit: list[dict], driver_loc: dict, fo
         iid = str(item.get("id") or "").strip()
         ai_meta = ai_by_key.get(f"oid:{oid}") or ai_by_key.get(f"id:{iid}") or {}
 
-        suit = str(ai_meta.get("ai_suitability") or ("recommended" if item.get("accepted") else "unsuitable")).lower()
+        default_suit = "recommended" if item.get("accepted") else "unsuitable"
+        suit = str(ai_meta.get("ai_suitability") or default_suit).lower().strip()
         if suit not in suitability_rank:
-            suit = "recommended" if item.get("accepted") else "unsuitable"
+            suit = default_suit
+
+        if suit == "recommended" and (item.get("warnings") or []):
+            suit = "caution"
 
         try:
             score = float(ai_meta.get("ai_score", 80.0 if item.get("accepted") else 20.0))
+            if math.isnan(score) or math.isinf(score):
+                score = 80.0 if item.get("accepted") else 20.0
         except Exception:
             score = 80.0 if item.get("accepted") else 20.0
 
@@ -1271,7 +1285,7 @@ def analyze_all_freights_with_gemini(all_audit: list[dict], driver_loc: dict, fo
         key=lambda x: (
             suitability_rank.get(x.get("ai_suitability", "unsuitable"), 2),
             -float(x.get("ai_score", 0.0)),
-            float(x.get("hareth_distance_km", 9999.0)),
+            float(x.get("hareth_distance_km") if x.get("hareth_distance_km") is not None else 9999.0),
         )
     )
 
@@ -1284,9 +1298,16 @@ def analyze_all_freights_with_gemini(all_audit: list[dict], driver_loc: dict, fo
         f"{rec_count} موصى بها، و{caution_count} تحتاج تنبيهاً/مراجعة."
     )
 
+    if not ai_by_key and batch_errors:
+        status_val = "error"
+    elif batch_errors:
+        status_val = "partial_error"
+    else:
+        status_val = "ok"
+
     result_payload = {
         "enabled": True,
-        "status": "partial_error" if batch_errors and not ai_by_key else "ok",
+        "status": status_val,
         "model": used_model,
         "cached": False,
         "errors": batch_errors,
@@ -1312,7 +1333,10 @@ def analyze_all_freights_with_gemini(all_audit: list[dict], driver_loc: dict, fo
 # 6. جلب وفلترة الحمولات المباشرة
 # ==========================================
 def get_live_hareth_loads():
-    max_pages = int(request.args.get("max_pages", "10"))
+    try:
+        max_pages = int(request.args.get("max_pages", "10"))
+    except ValueError:
+        max_pages = 10
     max_pages = max(1, min(max_pages, 15))
     ai_param = (request.args.get("ai", "1") or "1").strip().lower()
     use_ai = ai_param not in ("0", "false", "no", "off")
@@ -1359,7 +1383,11 @@ def get_live_hareth_loads():
                 first_resp = client.get(first_url, headers=retry_headers)
 
             for page in range(1, max_pages + 1):
-                resp = first_resp if page == 1 else client.get(f"https://e-kurier.net/portal/freights?page={page}")
+                page_headers = {"Cookie": cookie_header} if cookie_header else {}
+                resp = first_resp if page == 1 else client.get(
+                    f"https://e-kurier.net/portal/freights?page={page}",
+                    headers=page_headers,
+                )
                 if page == 1:
                     diag["first_page_status"] = resp.status_code
                     diag["first_page_length"] = len(resp.text or "")
@@ -1491,9 +1519,15 @@ def update_gps():
     if lat is None or lng is None:
         return jsonify({"status": "error", "message": "lat and lng are required"}), 400
 
+    try:
+        lat_f = float(lat)
+        lng_f = float(lng)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "lat and lng must be valid numbers"}), 400
+
     with _LOC_LOCK:
-        hareth_live_location["lat"] = float(lat)
-        hareth_live_location["lng"] = float(lng)
+        hareth_live_location["lat"] = lat_f
+        hareth_live_location["lng"] = lng_f
         hareth_live_location["accuracy"] = data.get("accuracy")
         hareth_live_location["speed"] = data.get("speed")
         hareth_live_location["device"] = data.get("device", "Hareth-Device")
