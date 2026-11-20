@@ -82,6 +82,7 @@ EU_CITIES_COORDS = {
     "kupferzell": (49.2333, 9.6833),
     "stapelfeld": (53.5833, 10.2167),
     "siegen": (50.8749, 8.0229),
+    "schmalkalden": (50.7222, 10.4514),
     "karlsruhe": (49.0069, 8.4037),
     "friedrichshall": (49.2333, 9.2167),
     "novo mesto": (45.8000, 15.1667),
@@ -100,6 +101,10 @@ EU_CITIES_COORDS = {
     "göttingen": (51.5413, 9.9158),
     "wnzelsau": (49.2750, 9.7014),
     "ingersheim": (48.9675, 9.1931),
+    "krefeld": (51.3388, 6.5853),
+    "hofkirchen": (48.3667, 13.8667),
+    "troisdorf": (50.8161, 7.1556),
+    "lastrup": (52.7833, 7.9833),
 }
 
 
@@ -208,11 +213,10 @@ def get_active_client():
         return client
 
 
-def _exceeds_cargo_dimensions(text_lower: str) -> bool:
+def _exceeds_cargo_dimensions(text_lower: str) -> str | None:
     max_len_cm = HARETH_VEHICLE_SPECS["cargo_length_cm"]
     max_wid_cm = HARETH_VEHICLE_SPECS["cargo_width_cm"]
 
-    # فحص صيغ مثل: 4,2 x 2,2 x 2,2 m أو 150x80x100 cm
     for m in re.finditer(
         r"(\d+(?:[\.,]\d+)?)\s*[x×]\s*(\d+(?:[\.,]\d+)?)(?:\s*[x×]\s*(\d+(?:[\.,]\d+)?))?\s*(cm|m)\b",
         text_lower,
@@ -227,9 +231,8 @@ def _exceeds_cargo_dimensions(text_lower: str) -> bool:
             longest_cm = max(dims_cm)
             shortest_cm = min(dims_cm)
             if longest_cm > max_len_cm or shortest_cm > max_wid_cm:
-                return True
+                return f"أبعاد أكبر من الصندوق ({longest_cm}x{shortest_cm} cm)"
 
-    # فحص الطول والعرض عند ذكرهما بالاسم
     for m in re.finditer(
         r"(?:länge|length|طول)[^\d]{0,12}(\d+(?:[\.,]\d+)?)\s*(cm|m)\b",
         text_lower,
@@ -239,7 +242,7 @@ def _exceeds_cargo_dimensions(text_lower: str) -> bool:
         if val is not None:
             cm_val = val * 100.0 if unit == "m" else val
             if cm_val > max_len_cm:
-                return True
+                return f"الطول يتجاوز {max_len_cm} cm ({cm_val} cm)"
 
     for m in re.finditer(
         r"(?:breite|width|عرض)[^\d]{0,12}(\d+(?:[\.,]\d+)?)\s*(cm|m)\b",
@@ -250,12 +253,12 @@ def _exceeds_cargo_dimensions(text_lower: str) -> bool:
         if val is not None:
             cm_val = val * 100.0 if unit == "m" else val
             if cm_val > max_wid_cm:
-                return True
+                return f"العرض يتجاوز {max_wid_cm} cm ({cm_val} cm)"
 
-    return False
+    return None
 
 
-def is_suitable_for_fiat_ducato(card_text):
+def evaluate_load_suitability(card_text: str) -> tuple[bool, str]:
     text_lower = card_text.lower()
     max_kg = HARETH_VEHICLE_SPECS["max_payload_kg"]
 
@@ -276,9 +279,8 @@ def is_suitable_for_fiat_ducato(card_text):
     ]
     for keyword in heavy_truck_keywords:
         if keyword in text_lower:
-            return False
+            return False, f"كلمة شاحنة ثقيلة: {keyword}"
 
-    # فحص الأوزان بالكيلوغرام (kg / كغ)
     kg_matches = re.findall(
         r"(\d+(?:[\s\.,]\d+)?)\s*(?:kg|kg\.|kilogramm|كغ|كيلو)",
         text_lower,
@@ -286,9 +288,8 @@ def is_suitable_for_fiat_ducato(card_text):
     for w in kg_matches:
         val_kg = _parse_number(w)
         if val_kg is not None and val_kg > max_kg:
-            return False
+            return False, f"الوزن {val_kg} kg يتجاوز {max_kg} kg"
 
-    # فحص الأوزان بالأطنان (t / ton / tonnes / tonnen / طن)
     ton_matches = re.findall(
         r"(\d+(?:[\s\.,]\d+)?)\s*(?:t\b|ton\b|tons\b|tonne\b|tonnen\b|طن\b|أطنان\b)",
         text_lower,
@@ -298,12 +299,18 @@ def is_suitable_for_fiat_ducato(card_text):
         if val_tons is not None:
             val_kg = val_tons * 1000.0
             if val_kg > max_kg:
-                return False
+                return False, f"الوزن {val_tons} t ({val_kg} kg) يتجاوز {max_kg} kg"
 
-    if _exceeds_cargo_dimensions(text_lower):
-        return False
+    dim_reason = _exceeds_cargo_dimensions(text_lower)
+    if dim_reason:
+        return False, dim_reason
 
-    return True
+    return True, "مناسب لـ Fiat Ducato L4H2"
+
+
+def is_suitable_for_fiat_ducato(card_text):
+    suitable, _ = evaluate_load_suitability(card_text)
+    return suitable
 
 
 def _extract_origin_destination(lines):
@@ -416,6 +423,8 @@ def get_live_hareth_loads():
         req_lat = request.args.get("lat", type=float)
         req_lng = request.args.get("lng", type=float)
         max_distance_km = request.args.get("max_km", type=float)
+        max_pages = request.args.get("max_pages", default=25, type=int)
+        max_pages = max(1, min(max_pages, 50))
 
         if req_lat is not None and req_lng is not None:
             hareth_lat, hareth_lng = req_lat, req_lng
@@ -431,8 +440,10 @@ def get_live_hareth_loads():
 
         seen_signatures = set()
         raw_items = []
+        pages_scanned = 0
 
-        for page_num in range(1, 3):
+        # جلب جميع الصفحات المتاحة تباعاً حتى نهاية القائمة أو بلوغ سقف الأمان
+        for page_num in range(1, max_pages + 1):
             target_page = f"{freights_url}?page={page_num}"
             response = client.get(target_page)
 
@@ -441,28 +452,43 @@ def get_live_hareth_loads():
                 client = get_active_client()
                 response = client.get(target_page)
 
-            if response.status_code == 200 and "login" not in str(response.url).lower():
-                soup = BeautifulSoup(response.text, "html.parser")
-                cards = soup.find_all("article")
-                if not cards:
-                    cards = soup.select(
-                        'div[class*="freight"], tr, div[class*="card"], li[class*="load"]'
-                    )
+            if response.status_code != 200 or "login" in str(response.url).lower():
+                break
 
-                for card in cards:
-                    text = card.get_text(separator="\n", strip=True)
-                    if len(text) > 15 and is_suitable_for_fiat_ducato(text):
-                        lines = [line.strip() for line in text.split("\n") if line.strip()]
-                        sig = tuple(lines)
-                        if sig not in seen_signatures:
-                            seen_signatures.add(sig)
-                            offer_url = extract_card_url(card, fallback_url=target_page)
-                            raw_items.append({
-                                "lines": lines,
-                                "offer_url": offer_url,
-                            })
+            pages_scanned += 1
+            soup = BeautifulSoup(response.text, "html.parser")
+            cards = soup.find_all("article")
+            if not cards:
+                cards = soup.select(
+                    'div[class*="freight"], tr, div[class*="card"], li[class*="load"]'
+                )
+
+            new_cards_in_page = 0
+            for card in cards:
+                text = card.get_text(separator="\n", strip=True)
+                if len(text) > 15:
+                    lines = [line.strip() for line in text.split("\n") if line.strip()]
+                    sig = tuple(lines)
+                    if sig not in seen_signatures:
+                        seen_signatures.add(sig)
+                        new_cards_in_page += 1
+                        offer_url = extract_card_url(card, fallback_url=target_page)
+                        suitable, reason = evaluate_load_suitability(text)
+                        raw_items.append({
+                            "text": text,
+                            "lines": lines,
+                            "offer_url": offer_url,
+                            "accepted": suitable,
+                            "filter_reason": reason,
+                        })
+
+            # إذا لم تظهر بطاقات جديدة في الصفحة، فقد وصلنا لنهاية الحمولات
+            if new_cards_in_page == 0:
+                break
 
         formatted_loads = []
+        audit_comparison = []
+
         for idx, item in enumerate(raw_items, start=1):
             lines = item["lines"]
             origin, destination = _extract_origin_destination(lines)
@@ -475,10 +501,24 @@ def get_live_hareth_loads():
             else:
                 hareth_distance = 9999.0
 
-            if max_distance_km is not None and hareth_distance > max_distance_km:
+            floor_price = round(distance_km * 1.3 * 1.2, 2)
+
+            audit_comparison.append({
+                "id": idx,
+                "origin": origin,
+                "destination": destination,
+                "distance_km": distance_km,
+                "hareth_distance_km": hareth_distance,
+                "accepted": item["accepted"],
+                "filter_reason": item["filter_reason"],
+                "offer_url": item["offer_url"],
+            })
+
+            if not item["accepted"]:
                 continue
 
-            floor_price = round(distance_km * 1.3 * 1.2, 2)
+            if max_distance_km is not None and hareth_distance > max_distance_km:
+                continue
 
             formatted_loads.append({
                 "id": idx,
@@ -502,8 +542,11 @@ def get_live_hareth_loads():
             "gps_active": hareth_lat is not None and hareth_lng is not None,
             "driver_location": REAL_DRIVER_LOCATION,
             "sorted_by": "nearest_to_hareth_live_gps",
+            "pages_scanned": pages_scanned,
+            "total_raw_before_filter": len(audit_comparison),
             "total_fetched": len(formatted_loads),
             "loads": formatted_loads,
+            "audit_comparison": audit_comparison,
         }), 200
 
     except Exception as e:
