@@ -92,6 +92,14 @@ EU_CITIES_COORDS = {
     "schwedt": (53.0667, 14.3000),
     "ortenburg": (48.6667, 13.3167),
     "bonn": (50.7374, 7.0982),
+    "monte san pietro": (44.3956, 11.1539),
+    "las palmas": (28.1235, -15.4363),
+    "craiova": (44.3302, 23.7949),
+    "sighisoara": (46.2197, 24.7964),
+    "schwandorf": (49.3267, 12.1047),
+    "göttingen": (51.5413, 9.9158),
+    "wnzelsau": (49.2750, 9.7014),
+    "ingersheim": (48.9675, 9.1931),
 }
 
 
@@ -100,6 +108,15 @@ def _parse_number(num_str: str):
         return float(num_str.replace(" ", "").replace(",", "."))
     except Exception:
         return None
+
+
+def _clean_text_for_matching(text: str) -> str:
+    cleaned = text.lower()
+    cleaned = cleaned.replace("\ufffd", " ")
+    cleaned = re.sub(r"[*#]+", " ", cleaned)
+    cleaned = re.sub(r"\b\d{4,6}\b", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
 
 def normalize_url(href):
@@ -191,6 +208,53 @@ def get_active_client():
         return client
 
 
+def _exceeds_cargo_dimensions(text_lower: str) -> bool:
+    max_len_cm = HARETH_VEHICLE_SPECS["cargo_length_cm"]
+    max_wid_cm = HARETH_VEHICLE_SPECS["cargo_width_cm"]
+
+    # فحص صيغ مثل: 4,2 x 2,2 x 2,2 m أو 150x80x100 cm
+    for m in re.finditer(
+        r"(\d+(?:[\.,]\d+)?)\s*[x×]\s*(\d+(?:[\.,]\d+)?)(?:\s*[x×]\s*(\d+(?:[\.,]\d+)?))?\s*(cm|m)\b",
+        text_lower,
+    ):
+        d1 = _parse_number(m.group(1))
+        d2 = _parse_number(m.group(2))
+        unit = m.group(4)
+        factor = 100.0 if unit == "m" else 1.0
+
+        dims_cm = [v * factor for v in (d1, d2) if v is not None]
+        if dims_cm:
+            longest_cm = max(dims_cm)
+            shortest_cm = min(dims_cm)
+            if longest_cm > max_len_cm or shortest_cm > max_wid_cm:
+                return True
+
+    # فحص الطول والعرض عند ذكرهما بالاسم
+    for m in re.finditer(
+        r"(?:länge|length|طول)[^\d]{0,12}(\d+(?:[\.,]\d+)?)\s*(cm|m)\b",
+        text_lower,
+    ):
+        val = _parse_number(m.group(1))
+        unit = m.group(2)
+        if val is not None:
+            cm_val = val * 100.0 if unit == "m" else val
+            if cm_val > max_len_cm:
+                return True
+
+    for m in re.finditer(
+        r"(?:breite|width|عرض)[^\d]{0,12}(\d+(?:[\.,]\d+)?)\s*(cm|m)\b",
+        text_lower,
+    ):
+        val = _parse_number(m.group(1))
+        unit = m.group(2)
+        if val is not None:
+            cm_val = val * 100.0 if unit == "m" else val
+            if cm_val > max_wid_cm:
+                return True
+
+    return False
+
+
 def is_suitable_for_fiat_ducato(card_text):
     text_lower = card_text.lower()
     max_kg = HARETH_VEHICLE_SPECS["max_payload_kg"]
@@ -236,44 +300,46 @@ def is_suitable_for_fiat_ducato(card_text):
             if val_kg > max_kg:
                 return False
 
-    # فحص الأبعاد إذا ذُكرت صراحةً بالسم أو المتر مع كلمات الطول أو العرض
-    max_len_cm = HARETH_VEHICLE_SPECS["cargo_length_cm"]
-    max_wid_cm = HARETH_VEHICLE_SPECS["cargo_width_cm"]
-
-    for m in re.finditer(
-        r"(?:länge|length|طول)[^\d]{0,12}(\d+(?:[\.,]\d+)?)\s*(cm|m)\b",
-        text_lower,
-    ):
-        val = _parse_number(m.group(1))
-        unit = m.group(2)
-        if val is not None:
-            cm_val = val * 100.0 if unit == "m" else val
-            if cm_val > max_len_cm:
-                return False
-
-    for m in re.finditer(
-        r"(?:breite|width|عرض)[^\d]{0,12}(\d+(?:[\.,]\d+)?)\s*(cm|m)\b",
-        text_lower,
-    ):
-        val = _parse_number(m.group(1))
-        unit = m.group(2)
-        if val is not None:
-            cm_val = val * 100.0 if unit == "m" else val
-            if cm_val > max_wid_cm:
-                return False
+    if _exceeds_cargo_dimensions(text_lower):
+        return False
 
     return True
 
 
-def _extract_city_coords(lines):
+def _extract_origin_destination(lines):
+    origin = "غير محدد"
+    destination = "غير محدد"
+
+    for i, line in enumerate(lines):
+        low = line.lower().strip()
+        if low in ("loading:", "loading") and i + 1 < len(lines):
+            origin = lines[i + 1].strip()
+        elif low.startswith("loading:") and len(line) > len("loading:"):
+            origin = line.split(":", 1)[1].strip()
+        elif low in ("unloading:", "unloading") and i + 1 < len(lines):
+            destination = lines[i + 1].strip()
+        elif low.startswith("unloading:") and len(line) > len("unloading:"):
+            destination = line.split(":", 1)[1].strip()
+
+    if origin == "غير محدد" and len(lines) > 0:
+        origin = lines[0]
+    if destination == "غير محدد" and len(lines) > 1:
+        destination = lines[1]
+
+    return origin, destination
+
+
+def _extract_city_coords(origin: str, lines: list):
     candidates = []
+    if origin and origin != "غير محدد":
+        candidates.append(_clean_text_for_matching(origin))
     if lines:
-        candidates.append(lines[0].lower())
-        if len(lines) > 1:
-            candidates.append(" ".join(lines[:2]).lower())
-    candidates.append(" ".join(lines).lower())
+        candidates.append(_clean_text_for_matching(" ".join(lines[:4])))
+    candidates.append(_clean_text_for_matching(" ".join(lines)))
 
     for text_block in candidates:
+        if not text_block:
+            continue
         for city, coords in sorted(
             EU_CITIES_COORDS.items(), key=lambda x: len(x[0]), reverse=True
         ):
@@ -282,8 +348,8 @@ def _extract_city_coords(lines):
     return None
 
 
-def calculate_fast_road_distance(h_lat, h_lng, lines):
-    target_coords = _extract_city_coords(lines)
+def calculate_fast_road_distance(h_lat, h_lng, origin, lines):
+    target_coords = _extract_city_coords(origin, lines)
     if target_coords is None:
         return 9999.0
 
@@ -399,14 +465,12 @@ def get_live_hareth_loads():
         formatted_loads = []
         for idx, item in enumerate(raw_items, start=1):
             lines = item["lines"]
-            origin = lines[0] if len(lines) > 0 else "غير محدد"
-            destination = lines[1] if len(lines) > 1 else "غير محدد"
-
+            origin, destination = _extract_origin_destination(lines)
             distance_km = _extract_route_distance_km(lines)
 
             if hareth_lat is not None and hareth_lng is not None:
                 hareth_distance = calculate_fast_road_distance(
-                    hareth_lat, hareth_lng, lines
+                    hareth_lat, hareth_lng, origin, lines
                 )
             else:
                 hareth_distance = 9999.0
