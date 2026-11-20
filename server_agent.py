@@ -25,20 +25,27 @@ DEFAULT_HARETH_HOME_LAT = 50.69470
 DEFAULT_HARETH_HOME_LNG = 11.59367
 DEFAULT_HARETH_HOME_LABEL = "Hareth-Home"
 
-# قائمة موديلات Gemini المحددة في البرمجة (أحدث جيل Gemini 4 مع بدائل حديثة بدون نماذج متوقفة)
-GEMINI_CANDIDATE_MODELS = list(dict.fromkeys([
-    m.strip()
-    for m in (
-        os.environ.get("GEMINI_MODEL", "")
-        + ",gemini-4-hydrogen,gemini-3.8-flash,gemini-4-argon"
-    ).split(",")
-    if m.strip()
-]))
+# تثبيت نموذج واحد فعّال وموجود افتراضياً (gemini-4-hydrogen) لتجنب استدعاء نماذج غير مطلوبة واستنزاف الحصة
+_ENV_GEMINI_MODEL = (os.environ.get("GEMINI_MODEL") or "").strip()
+_ENV_GEMINI_CANDIDATES = (os.environ.get("GEMINI_CANDIDATES") or "").strip()
+
+if _ENV_GEMINI_CANDIDATES:
+    GEMINI_CANDIDATE_MODELS = list(dict.fromkeys([
+        m.strip()
+        for m in (_ENV_GEMINI_MODEL + "," + _ENV_GEMINI_CANDIDATES).split(",")
+        if m.strip()
+    ]))
+elif _ENV_GEMINI_MODEL:
+    GEMINI_CANDIDATE_MODELS = [_ENV_GEMINI_MODEL]
+else:
+    GEMINI_CANDIDATE_MODELS = ["gemini-4-hydrogen"]
+
 GEMINI_MODEL = GEMINI_CANDIDATE_MODELS[0] if GEMINI_CANDIDATE_MODELS else "gemini-4-hydrogen"
 
-GEMINI_BATCH_SIZE = max(5, min(int(os.environ.get("GEMINI_BATCH_SIZE", "18")), 40))
-GEMINI_RETRY_429_WAIT_SEC = max(1.0, min(float(os.environ.get("GEMINI_RETRY_429_WAIT_SEC", "4.0")), 20.0))
-AI_CACHE_TTL_SEC = max(15, min(int(os.environ.get("AI_CACHE_TTL_SEC", "120")), 900))
+GEMINI_BATCH_SIZE = max(5, min(int(os.environ.get("GEMINI_BATCH_SIZE", "20")), 40))
+GEMINI_MAX_ATTEMPTS = max(1, min(int(os.environ.get("GEMINI_MAX_ATTEMPTS", "1")), 3))
+GEMINI_RETRY_429_WAIT_SEC = max(0.5, min(float(os.environ.get("GEMINI_RETRY_429_WAIT_SEC", "1.5")), 20.0))
+AI_CACHE_TTL_SEC = max(15, min(int(os.environ.get("AI_CACHE_TTL_SEC", "180")), 900))
 
 HEAVY_TRUCK_PATTERNS = [
     r"\b7[.,]\s*5\s*t(?:on(?:nen|s)?)?\b",
@@ -1091,6 +1098,11 @@ def _extract_json_object(raw_text: str) -> dict | None:
     return None
 
 
+def _sanitize_error_message(err: Exception) -> str:
+    msg = re.sub(r"([?&]key=)[^&\s]+", r"\1***", str(err))
+    return f"{type(err).__name__}: {msg[:160]}"
+
+
 def _call_gemini_batch(api_key: str, batch_items: list[dict], driver_loc: dict) -> tuple[list[dict], str]:
     global _ACTIVE_GEMINI_MODEL
     system_instruction = (
@@ -1131,9 +1143,10 @@ def _call_gemini_batch(api_key: str, batch_items: list[dict], driver_loc: dict) 
     with _MODEL_LOCK:
         preferred = _ACTIVE_GEMINI_MODEL
 
-    models_to_try = ([preferred] if preferred else []) + [
-        m for m in GEMINI_CANDIDATE_MODELS if m != preferred
-    ]
+    if preferred and preferred in GEMINI_CANDIDATE_MODELS:
+        models_to_try = [preferred] + [m for m in GEMINI_CANDIDATE_MODELS if m != preferred]
+    else:
+        models_to_try = list(GEMINI_CANDIDATE_MODELS) or [GEMINI_MODEL]
 
     last_err: Exception | None = None
     prompt_text = f"{system_instruction}\n\n{json.dumps(user_prompt, ensure_ascii=False)}"
@@ -1143,48 +1156,44 @@ def _call_gemini_batch(api_key: str, batch_items: list[dict], driver_loc: dict) 
         if not clean_model:
             continue
 
-        for api_ver in ("v1beta", "v1"):
-            url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{clean_model}:generateContent"
-            payload = {
-                "contents": [{"parts": [{"text": prompt_text}]}],
-                "generationConfig": {
-                    "temperature": 0.2,
-                    "responseMimeType": "application/json",
-                },
-            }
+        url = f"https://generativelanguage.googleapis.com/v1/models/{clean_model}:generateContent"
+        payload = {
+            "contents": [{"parts": [{"text": prompt_text}]}],
+            "generationConfig": {
+                "temperature": 0.2,
+                "responseMimeType": "application/json",
+            },
+        }
 
-            max_attempts = 2
-            for attempt in range(max_attempts):
-                try:
-                    with httpx.Client(timeout=20.0) as client:
-                        resp = client.post(url, params={"key": api_key}, json=payload)
-                        resp.raise_for_status()
-                        body = resp.json()
+        for attempt in range(GEMINI_MAX_ATTEMPTS):
+            try:
+                with httpx.Client(timeout=20.0) as client:
+                    resp = client.post(url, params={"key": api_key}, json=payload)
+                    resp.raise_for_status()
+                    body = resp.json()
 
-                    with _MODEL_LOCK:
-                        _ACTIVE_GEMINI_MODEL = clean_model
+                with _MODEL_LOCK:
+                    _ACTIVE_GEMINI_MODEL = clean_model
 
-                    candidates = body.get("candidates") or []
-                    if not candidates:
-                        return [], clean_model
-                    parts = ((candidates[0].get("content") or {}).get("parts")) or []
-                    text_out = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
-                    parsed = _extract_json_object(text_out)
-                    if not parsed or not isinstance(parsed.get("items"), list):
-                        return [], clean_model
-                    return [x for x in parsed["items"] if isinstance(x, dict)], clean_model
-                except httpx.HTTPStatusError as e:
-                    last_err = e
-                    status_code = e.response.status_code if e.response is not None else None
-                    if status_code == 429 and attempt + 1 < max_attempts:
-                        time.sleep(GEMINI_RETRY_429_WAIT_SEC)
-                        continue
-                    if status_code in (400, 404, 429, 503):
-                        break
-                    raise
-                except Exception as e:
-                    last_err = e
-                    break
+                candidates = body.get("candidates") or []
+                if not candidates:
+                    return [], clean_model
+                parts = ((candidates[0].get("content") or {}).get("parts")) or []
+                text_out = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+                parsed = _extract_json_object(text_out)
+                if not parsed or not isinstance(parsed.get("items"), list):
+                    return [], clean_model
+                return [x for x in parsed["items"] if isinstance(x, dict)], clean_model
+            except httpx.HTTPStatusError as e:
+                last_err = e
+                status_code = e.response.status_code if e.response is not None else None
+                if status_code == 429 and attempt + 1 < GEMINI_MAX_ATTEMPTS:
+                    time.sleep(GEMINI_RETRY_429_WAIT_SEC)
+                    continue
+                break
+            except Exception as e:
+                last_err = e
+                break
 
     if last_err:
         raise last_err
@@ -1248,7 +1257,7 @@ def analyze_all_freights_with_gemini(all_audit: list[dict], driver_loc: dict, fo
                 if iid:
                     ai_by_key[f"id:{iid}"] = r
         except Exception as e:
-            batch_errors.append(f"{type(e).__name__}: {str(e)[:160]}")
+            batch_errors.append(_sanitize_error_message(e))
 
     if batch_errors:
         print(f"[GEMINI_BATCH_ERRORS] model={used_model} errors={batch_errors!r}", flush=True)
