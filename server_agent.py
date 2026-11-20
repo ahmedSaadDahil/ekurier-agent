@@ -27,8 +27,18 @@ HEAVY_TRUCK_KEYWORDS = [
     "lkw", "truck", "شاحنة", "تريلا", "مقطورة"
 ]
 
-LOADING_LABELS = {"loading", "loading:", "beladung", "beladung:", "laden", "laden:", "abholung", "abholung:"}
-UNLOADING_LABELS = {"unloading", "unloading:", "entladung", "entladung:", "entladen", "entladen:", "zustellung", "zustellung:"}
+LOADING_LABELS = {
+    "loading", "loading:", "beladung", "beladung:",
+    "laden", "laden:", "abholung", "abholung:",
+    "abholort", "abholort:", "pickup", "pickup:",
+    "von", "von:"
+}
+UNLOADING_LABELS = {
+    "unloading", "unloading:", "entladung", "entladung:",
+    "entladen", "entladen:", "zustellung", "zustellung:",
+    "zielort", "zielort:", "delivery", "delivery:",
+    "nach", "nach:"
+}
 
 # ==========================================
 # 2. تخزين موقع حارث الحي في الذاكرة
@@ -220,11 +230,11 @@ EU_CITIES_COORDS = {
     "gummersbach": (51.0239, 7.5628),
     "neunkirchen": (49.3447, 7.1797),
     "ungerhausen": (48.0167, 10.2667),
-    "billerbeck": (51.9772, 7.2911),
     "baden-baden": (48.7606, 8.2398),
     "sonnefeld": (50.2217, 11.1583),
     "herzebrock-clarholz": (51.8875, 8.2333),
     "bocholt": (51.8333, 6.6167),
+    "zossen": (52.2167, 13.4500),
 
     # النمسا
     "wien": (48.2082, 16.3738),
@@ -370,6 +380,13 @@ def _save_dynamic_coords() -> None:
 _load_dynamic_coords()
 
 
+def _clean_cookie_value(raw_cookie: str) -> str:
+    cleaned = (raw_cookie or "").replace("\r", "").replace("\n", "").strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ("'", '"'):
+        cleaned = cleaned[1:-1].strip()
+    return cleaned
+
+
 def _normalize_city_name(raw: str) -> str:
     s = (raw or "").strip().lower()
     s = re.sub(r"\b[a-z]{1,3}[-\s]?\d[\d\w\*]*\b", " ", s, flags=re.IGNORECASE)
@@ -508,18 +525,27 @@ def evaluate_load_for_ducato(load_text: str):
     return True, "مناسب لـ Fiat Ducato L4H2"
 
 
-def _has_route_markers(text_lower: str) -> bool:
-    markers = ("loading", "unloading", "beladung", "entladung", "laden", "entladen", "abholung", "zustellung")
-    return any(m in text_lower for m in markers)
+def _looks_like_freight_card(text_lower: str) -> bool:
+    markers = (
+        "loading", "unloading", "beladung", "entladung",
+        "laden", "entladen", "abholung", "zustellung",
+        "abholort", "zielort", "pickup", "delivery"
+    )
+    if any(m in text_lower for m in markers):
+        return True
+    has_km = bool(re.search(r'\b\d+(?:[.,]\d+)?\s*km\b', text_lower))
+    has_cargo_hint = any(k in text_lower for k in ("kg", "ton", "colli", "pallet", "palette", "goods", "distance", "entfernung"))
+    return has_km and has_cargo_hint
 
 
 def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = None):
     soup = BeautifulSoup(html_text, "html.parser")
     raw_items = []
+    sample_cards = []
 
     cards = soup.select("div.freight-item, div.card, tr.freight-row, article")
     if not cards:
-        cards = soup.find_all(["div", "tr"], limit=120)
+        cards = soup.find_all(["div", "tr"], limit=160)
 
     hareth_lat = hareth_live_location.get("lat")
     hareth_lng = hareth_live_location.get("lng")
@@ -532,7 +558,10 @@ def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = No
             continue
 
         joined_text = " | ".join(lines)
-        if not _has_route_markers(joined_text.lower()):
+        if len(sample_cards) < 2 and len(joined_text) > 20:
+            sample_cards.append(joined_text[:180])
+
+        if not _looks_like_freight_card(joined_text.lower()):
             continue
 
         idx += 1
@@ -544,6 +573,16 @@ def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = No
                 origin = lines[i + 1]
             elif low in UNLOADING_LABELS and i + 1 < len(lines):
                 destination = lines[i + 1]
+
+        if origin == "غير محدد" or destination == "غير محدد":
+            place_candidates = [
+                ln for ln in lines
+                if re.search(r'\b\d{2,5}\b', ln) and not re.search(r'\b\d+(?:[.,]\d+)?\s*km\b', ln.lower())
+            ]
+            if origin == "غير محدد" and len(place_candidates) >= 1:
+                origin = place_candidates[0]
+            if destination == "غير محدد" and len(place_candidates) >= 2:
+                destination = place_candidates[1]
 
         dist_match = re.search(r'(\d+(?:[.,]\d+)?)\s*km', joined_text.lower())
         distance_km = float(dist_match.group(1).replace(",", ".")) if dist_match else 0.0
@@ -587,14 +626,14 @@ def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = No
     accepted_loads = [x for x in raw_items if x["accepted"]]
     accepted_loads.sort(key=lambda x: x["hareth_distance_km"])
 
-    return accepted_loads, raw_items, len(cards)
+    return accepted_loads, raw_items, len(cards), sample_cards
 
 
 def get_live_hareth_loads():
     max_pages = int(request.args.get("max_pages", "10"))
     max_pages = max(1, min(max_pages, 15))
 
-    cookie_header = os.environ.get("EKURIER_COOKIE", "").strip()
+    cookie_header = _clean_cookie_value(os.environ.get("EKURIER_COOKIE", ""))
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -613,6 +652,7 @@ def get_live_hareth_loads():
         "first_page_length": 0,
         "first_page_cards": 0,
         "first_page_snippet": "",
+        "sample_cards": [],
     }
 
     try:
@@ -629,11 +669,12 @@ def get_live_hareth_loads():
                 if resp.status_code != 200 or not resp.text.strip():
                     break
                 pages_scanned += 1
-                accepted, audit, cards_count = parse_freights_html(
+                accepted, audit, cards_count, samples = parse_freights_html(
                     resp.text, lookups_remaining=lookups_remaining
                 )
                 if page == 1:
                     diag["first_page_cards"] = cards_count
+                    diag["sample_cards"] = samples
 
                 if not audit:
                     break
@@ -644,7 +685,7 @@ def get_live_hareth_loads():
             print(
                 f"[DIAGNOSTIC] empty loads: status={diag['first_page_status']} "
                 f"len={diag['first_page_length']} cards={diag['first_page_cards']} "
-                f"cookie={diag['cookie_configured']} snippet={diag['first_page_snippet']!r}",
+                f"cookie={diag['cookie_configured']} samples={diag['sample_cards']!r}",
                 flush=True,
             )
 
