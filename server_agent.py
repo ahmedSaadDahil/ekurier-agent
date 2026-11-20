@@ -25,16 +25,16 @@ DEFAULT_HARETH_HOME_LAT = 50.69470
 DEFAULT_HARETH_HOME_LNG = 11.59367
 DEFAULT_HARETH_HOME_LABEL = "Hareth-Home"
 
-# قائمة موديلات Gemini المحددة في البرمجة (يجربها السيرفر تلقائياً إذا ظهر خطأ 404/400)
+# قائمة موديلات Gemini المحددة في البرمجة (أحدث جيل Gemini 4 مع بدائل حديثة بدون نماذج متوقفة)
 GEMINI_CANDIDATE_MODELS = list(dict.fromkeys([
     m.strip()
     for m in (
         os.environ.get("GEMINI_MODEL", "")
-        + ",gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash"
+        + ",gemini-4-hydrogen,gemini-3.8-flash,gemini-4-argon"
     ).split(",")
     if m.strip()
 ]))
-GEMINI_MODEL = GEMINI_CANDIDATE_MODELS[0] if GEMINI_CANDIDATE_MODELS else "gemini-2.5-flash"
+GEMINI_MODEL = GEMINI_CANDIDATE_MODELS[0] if GEMINI_CANDIDATE_MODELS else "gemini-4-hydrogen"
 
 GEMINI_BATCH_SIZE = max(5, min(int(os.environ.get("GEMINI_BATCH_SIZE", "18")), 40))
 AI_CACHE_TTL_SEC = max(15, min(int(os.environ.get("AI_CACHE_TTL_SEC", "120")), 900))
@@ -1169,7 +1169,7 @@ def _call_gemini_batch(api_key: str, batch_items: list[dict], driver_loc: dict) 
             except httpx.HTTPStatusError as e:
                 last_err = e
                 status_code = e.response.status_code if e.response is not None else None
-                if status_code in (400, 404):
+                if status_code in (400, 404, 503):
                     continue
                 raise
             except Exception as e:
@@ -1239,6 +1239,9 @@ def analyze_all_freights_with_gemini(all_audit: list[dict], driver_loc: dict, fo
                     ai_by_key[f"id:{iid}"] = r
         except Exception as e:
             batch_errors.append(f"{type(e).__name__}: {str(e)[:160]}")
+
+    if batch_errors:
+        print(f"[GEMINI_BATCH_ERRORS] model={used_model} errors={batch_errors!r}", flush=True)
 
     suitability_rank = {"recommended": 0, "caution": 1, "unsuitable": 2}
     merged_list: list[dict] = []
