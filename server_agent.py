@@ -90,10 +90,7 @@ UI_NOISE_PHRASES = (
     "eigene vorlagen",
     "my applications",
     "current freight (",
-    "chat starten",
     "info@e-kurier.net",
-    "are you sure you want to withdraw",
-    "do you really want to withdraw",
     "fehler melden",
     "datenschutz",
     "impressum",
@@ -691,7 +688,6 @@ def _parse_number_eu_us(num_str: str) -> float | None:
     s = (num_str or "").strip().replace(" ", "")
     if not s:
         return None
-    # إذا احتوت على نقطة وفاصلة معاً، مثل 1.200,50 أو 1,200.50
     if "." in s and "," in s:
         if s.rfind(",") > s.rfind("."):
             s = s.replace(".", "").replace(",", ".")
@@ -699,7 +695,6 @@ def _parse_number_eu_us(num_str: str) -> float | None:
             s = s.replace(",", "")
     elif "." in s:
         parts = s.split(".")
-        # إذا كان هناك أكثر من نقطة، أو جزء عشري من 3 أرقام (مثل 24.000 أو 1.200) فهو غالباً فاصل آلاف في الكيلوجرام
         if len(parts) > 2 or (len(parts) == 2 and len(parts[1]) == 3 and parts[0] != "0"):
             s = s.replace(".", "")
     elif "," in s:
@@ -733,7 +728,6 @@ def parse_weight_to_kg(text: str, lines: list[str] | None = None):
     if not search_pool.strip():
         return None
 
-    # أولوية للوزن المقترن بـ kg / كجم / كيلو
     kg_matches = re.findall(r'([0-9][0-9.,\s]*[0-9]|[0-9])\s*(?:kg\b|كجم|كيلو)', search_pool, flags=re.IGNORECASE)
     parsed_kg = []
     for raw_num in kg_matches:
@@ -741,10 +735,8 @@ def parse_weight_to_kg(text: str, lines: list[str] | None = None):
         if val is not None and 0 < val < 100000:
             parsed_kg.append(val)
     if parsed_kg:
-        # في بطاقات e-kurier يظهر الوزن الإجمالي بعد | ثم أوزان القطع؛ نأخذ أكبر وزن إجمالي منطقي أو الأول
         return max(parsed_kg) if len(parsed_kg) > 1 and max(parsed_kg) <= 50000 else parsed_kg[0]
 
-    # ثانياً للوزن المقترن بـ ton / tonnen / t / طن بعد إزالة حدود فئات المركبات
     ton_matches = re.findall(r'([0-9][0-9.,\s]*[0-9]|[0-9])\s*(?:tonnen\b|tons\b|ton\b|t\b|طن)', search_pool, flags=re.IGNORECASE)
     for raw_num in ton_matches:
         val = _parse_number_eu_us(raw_num)
@@ -821,20 +813,27 @@ def evaluate_load_for_ducato(load_text: str, lines: list[str] | None = None, wei
 
 
 def _is_ui_or_hotline_entry(origin: str, destination: str, joined_lower: str) -> bool:
-    if any(phrase in joined_lower for phrase in UI_NOISE_PHRASES):
-        return True
     orig_clean = (origin or "").strip()
     dest_clean = (destination or "").strip()
     if re.fullmatch(r"\+?\d[\d\s\-/()]{6,}", orig_clean) or re.fullmatch(r"\+?\d[\d\s\-/()]{6,}", dest_clean):
         return True
     if orig_clean == "غير محدد" and dest_clean == "غير محدد":
         return True
+    has_route_or_cargo = any(
+        m in joined_lower
+        for m in (
+            "loading", "unloading", "beladung", "entladung",
+            "laden", "entladen", "abholung", "zustellung",
+            "goods", "waren", "ladung", "fracht", "sendung",
+            "colli", "pallet", "palette", "packstück", "kg"
+        )
+    )
+    if not has_route_or_cargo and any(phrase in joined_lower for phrase in UI_NOISE_PHRASES):
+        return True
     return False
 
 
 def _looks_like_freight_card(text_lower: str) -> bool:
-    if any(phrase in text_lower for phrase in UI_NOISE_PHRASES):
-        return False
     markers = (
         "loading", "unloading", "beladung", "entladung",
         "laden", "entladen", "abholung", "zustellung",
@@ -876,7 +875,7 @@ def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = No
 
         joined_text = " | ".join(lines)
         joined_lower = joined_text.lower()
-        if len(sample_cards) < 2 and len(joined_text) > 20 and not any(p in joined_lower for p in UI_NOISE_PHRASES):
+        if len(sample_cards) < 2 and len(joined_text) > 20:
             sample_cards.append(joined_text[:180])
 
         if not _looks_like_freight_card(joined_lower):
