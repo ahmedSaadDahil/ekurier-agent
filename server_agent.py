@@ -13,14 +13,29 @@ from datetime import datetime, timezone
 app = Flask(__name__)
 
 # ==========================================
-# 1. إعدادات السيارة (Fiat Ducato L4H2)
+# 1. إعدادات السيارة (Fiat Ducato L4H2) و Gemini والموقع الافتراضي
 # ==========================================
 MAX_PAYLOAD_KG = 1360.0
 MAX_LENGTH_CM = 375.0
 MAX_WIDTH_CM = 170.0
 MAX_HEIGHT_CM = 195.0
 
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+# إحداثيات منزل حارث مثبتة في البرمجة كخيار بديل عند عدم توفر GPS حي
+DEFAULT_HARETH_HOME_LAT = 50.69470
+DEFAULT_HARETH_HOME_LNG = 11.59367
+DEFAULT_HARETH_HOME_LABEL = "Hareth-Home"
+
+# قائمة موديلات Gemini المحددة في البرمجة (يجربها السيرفر تلقائياً إذا ظهر 404)
+GEMINI_CANDIDATE_MODELS = list(dict.fromkeys([
+    m.strip()
+    for m in (
+        os.environ.get("GEMINI_MODEL", "")
+        + ",gemini-2.0-flash,gemini-2.0-flash-lite,gemini-1.5-flash-latest,gemini-1.5-flash"
+    ).split(",")
+    if m.strip()
+]))
+GEMINI_MODEL = GEMINI_CANDIDATE_MODELS[0] if GEMINI_CANDIDATE_MODELS else "gemini-2.0-flash"
+
 GEMINI_BATCH_SIZE = max(5, min(int(os.environ.get("GEMINI_BATCH_SIZE", "18")), 40))
 AI_CACHE_TTL_SEC = max(15, min(int(os.environ.get("AI_CACHE_TTL_SEC", "120")), 900))
 
@@ -108,7 +123,7 @@ CARD_ACTION_NOISE = {
 }
 
 # ==========================================
-# 2. تخزين موقع حارث الحي والكوكي والكاش في الذاكرة
+# 2. تخزين موقع حارث الحي والبديل والكوكي والكاش في الذاكرة
 # ==========================================
 hareth_live_location = {
     "lat": None,
@@ -119,6 +134,7 @@ hareth_live_location = {
     "device": "Hareth-Device"
 }
 
+_LOC_LOCK = threading.Lock()
 _COOKIE_LOCK = threading.Lock()
 _RUNTIME_COOKIE: str | None = None
 _LAST_LOGIN_STATUS: str = "not_attempted"
@@ -126,6 +142,38 @@ _LAST_LOGIN_DEBUG: dict = {}
 
 _AI_CACHE_LOCK = threading.Lock()
 _AI_CACHE: dict[str, tuple[float, dict]] = {}
+
+_ACTIVE_GEMINI_MODEL: str | None = None
+_MODEL_LOCK = threading.Lock()
+
+
+def get_effective_hareth_location() -> dict:
+    with _LOC_LOCK:
+        live_lat = hareth_live_location.get("lat")
+        live_lng = hareth_live_location.get("lng")
+        if live_lat is not None and live_lng is not None:
+            return {
+                "lat": float(live_lat),
+                "lng": float(live_lng),
+                "accuracy": hareth_live_location.get("accuracy"),
+                "speed": hareth_live_location.get("speed"),
+                "device": hareth_live_location.get("device") or "Hareth-Device",
+                "timestamp": hareth_live_location.get("timestamp"),
+                "source": "live_gps",
+                "is_live": True,
+            }
+
+        return {
+            "lat": float(DEFAULT_HARETH_HOME_LAT),
+            "lng": float(DEFAULT_HARETH_HOME_LNG),
+            "accuracy": None,
+            "speed": None,
+            "device": DEFAULT_HARETH_HOME_LABEL,
+            "timestamp": None,
+            "source": "fallback_home",
+            "is_live": False,
+        }
+
 
 # ==========================================
 # 3. قاموس إحداثيات المدن الأوروبية وألمانيا
@@ -867,7 +915,7 @@ def _extract_offer_id(offer_url: str) -> str | None:
     return m.group(1) if m else None
 
 
-def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = None, page_num: int = 1):
+def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = None, page_num: int = 1, active_loc: dict | None = None):
     soup = BeautifulSoup(html_text, "html.parser")
     raw_items = []
     sample_cards = []
@@ -876,9 +924,10 @@ def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = No
     if not cards:
         cards = soup.find_all(["div", "tr"], limit=160)
 
-    hareth_lat = hareth_live_location.get("lat")
-    hareth_lng = hareth_live_location.get("lng")
-    has_hareth_gps = hareth_lat is not None and hareth_lng is not None
+    eff_loc = active_loc or get_effective_hareth_location()
+    hareth_lat = eff_loc.get("lat")
+    hareth_lng = eff_loc.get("lng")
+    has_hareth_coords = hareth_lat is not None and hareth_lng is not None
 
     idx = 0
     for card in cards:
@@ -924,7 +973,7 @@ def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = No
         floor_price = round(distance_km * 1.56, 2) if distance_km > 0 else 0.0
 
         hareth_distance_km = 9999.0
-        if has_hareth_gps:
+        if has_hareth_coords:
             origin_coords = extract_city_coords(origin, lookups_remaining=lookups_remaining)
             if origin_coords:
                 hareth_distance_km = haversine_km(
@@ -954,6 +1003,7 @@ def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = No
             "distance_km": distance_km,
             "floor_price": floor_price,
             "hareth_distance_km": hareth_distance_km,
+            "location_source": eff_loc.get("source", "none"),
             "max_payload_kg": MAX_PAYLOAD_KG,
             "cargo_weight_kg": cargo_weight_kg,
             "warnings": warnings,
@@ -994,6 +1044,7 @@ def _compact_load_for_gemini(item: dict) -> dict:
         "distance_km": item.get("distance_km"),
         "floor_price": item.get("floor_price"),
         "hareth_distance_km": item.get("hareth_distance_km"),
+        "location_source": item.get("location_source"),
         "cargo_weight_kg": item.get("cargo_weight_kg"),
         "warnings": item.get("warnings") or [],
         "accepted_by_rule": item.get("accepted"),
@@ -1024,14 +1075,15 @@ def _extract_json_object(raw_text: str) -> dict | None:
     return None
 
 
-def _call_gemini_batch(api_key: str, batch_items: list[dict], driver_loc: dict) -> list[dict]:
+def _call_gemini_batch(api_key: str, batch_items: list[dict], driver_loc: dict) -> tuple[list[dict], str]:
+    global _ACTIVE_GEMINI_MODEL
     system_instruction = (
         "أنت مساعد لوجستي ذكي للسائق حارث الذي يقود سيارة Fiat Ducato L4H2 "
         "(الحد الأقصى للحمولة 1360 كجم، الأبعاد الداخلية 375x170x195 سم). "
         "تحلل الحمولات المرسلة باللغتين الألمانية والإنجليزية وتعيد JSON فقط دون أي نص إضافي. "
         "لكل حمولة في الدفعة قيّم ملاءمتها العملية، ورتبها من الأفضل للأسوأ لحارث مع مراعاة: "
         "1) مطابقة الوزن والأبعاد والمركبة فعلياً (وتنبيه إذا كان المعلن كتب أبعاداً غريبة مثل 1200x800x1200 أو 4x2x2 أو لم يذكر الأبعاد أو ذكر وجهة جزيرة بعيدة مثل جزر الكناري/مايوركا). "
-        "2) القرب من موقع حارث إذا كان متوفراً (hareth_distance_km < 9000). "
+        "2) القرب من موقع حارث إذا كان متوفراً (hareth_distance_km < 9000) مع الانتباه إلى أن source قد يكون fallback_home (منزل حارث كخيار بديل) وليس live_gps. "
         "3) وضوح المسافة والمواعيد والجدوى."
     )
 
@@ -1060,39 +1112,66 @@ def _call_gemini_batch(api_key: str, batch_items: list[dict], driver_loc: dict) 
         "freights_batch": batch_items,
     }
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    payload = {
-        "system_instruction": {"parts": [{"text": system_instruction}]},
-        "contents": [{"parts": [{"text": json.dumps(user_prompt, ensure_ascii=False)}]}],
-        "generationConfig": {
-            "temperature": 0.2,
-            "responseMimeType": "application/json",
-        },
-    }
+    with _MODEL_LOCK:
+        preferred = _ACTIVE_GEMINI_MODEL
 
-    with httpx.Client(timeout=25.0) as client:
-        resp = client.post(url, params={"key": api_key}, json=payload)
-        resp.raise_for_status()
-        body = resp.json()
+    models_to_try = ([preferred] if preferred else []) + [
+        m for m in GEMINI_CANDIDATE_MODELS if m != preferred
+    ]
 
-    candidates = body.get("candidates") or []
-    if not candidates:
-        return []
-    parts = ((candidates[0].get("content") or {}).get("parts")) or []
-    text_out = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
-    parsed = _extract_json_object(text_out)
-    if not parsed or not isinstance(parsed.get("items"), list):
-        return []
-    return [x for x in parsed["items"] if isinstance(x, dict)]
+    last_err: Exception | None = None
+    for model_name in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+        payload = {
+            "system_instruction": {"parts": [{"text": system_instruction}]},
+            "contents": [{"parts": [{"text": json.dumps(user_prompt, ensure_ascii=False)}]}],
+            "generationConfig": {
+                "temperature": 0.2,
+                "responseMimeType": "application/json",
+            },
+        }
+        try:
+            with httpx.Client(timeout=25.0) as client:
+                resp = client.post(url, params={"key": api_key}, json=payload)
+                resp.raise_for_status()
+                body = resp.json()
+
+            with _MODEL_LOCK:
+                _ACTIVE_GEMINI_MODEL = model_name
+
+            candidates = body.get("candidates") or []
+            if not candidates:
+                return [], model_name
+            parts = ((candidates[0].get("content") or {}).get("parts")) or []
+            text_out = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+            parsed = _extract_json_object(text_out)
+            if not parsed or not isinstance(parsed.get("items"), list):
+                return [], model_name
+            return [x for x in parsed["items"] if isinstance(x, dict)], model_name
+        except httpx.HTTPStatusError as e:
+            last_err = e
+            if e.response is not None and e.response.status_code == 404:
+                continue
+            raise
+        except Exception as e:
+            last_err = e
+            raise
+
+    if last_err:
+        raise last_err
+    return [], GEMINI_MODEL
 
 
 def analyze_all_freights_with_gemini(all_audit: list[dict], driver_loc: dict, force_refresh: bool = False) -> dict:
+    with _MODEL_LOCK:
+        current_model = _ACTIVE_GEMINI_MODEL or GEMINI_MODEL
+
     api_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
     if not api_key:
         return {
             "enabled": False,
             "status": "missing_gemini_api_key",
-            "model": GEMINI_MODEL,
+            "model": current_model,
             "summary_ar": "لم يتم ضبط GEMINI_API_KEY على السيرفر بعد.",
             "ranked_loads": [],
         }
@@ -1101,7 +1180,7 @@ def analyze_all_freights_with_gemini(all_audit: list[dict], driver_loc: dict, fo
         return {
             "enabled": True,
             "status": "empty_loads",
-            "model": GEMINI_MODEL,
+            "model": current_model,
             "summary_ar": "لا توجد حمولات متاحة لتحليلها حالياً.",
             "ranked_loads": [],
         }
@@ -1126,11 +1205,12 @@ def analyze_all_freights_with_gemini(all_audit: list[dict], driver_loc: dict, fo
 
     ai_by_key: dict[str, dict] = {}
     batch_errors: list[str] = []
+    used_model = current_model
 
     for start in range(0, len(compact_all), GEMINI_BATCH_SIZE):
         batch = compact_all[start : start + GEMINI_BATCH_SIZE]
         try:
-            batch_results = _call_gemini_batch(api_key, batch, driver_loc)
+            batch_results, used_model = _call_gemini_batch(api_key, batch, driver_loc)
             for r in batch_results:
                 oid = str(r.get("offer_id") or "").strip()
                 iid = str(r.get("id") or "").strip()
@@ -1141,7 +1221,6 @@ def analyze_all_freights_with_gemini(all_audit: list[dict], driver_loc: dict, fo
         except Exception as e:
             batch_errors.append(f"{type(e).__name__}: {str(e)[:120]}")
 
-    # دمج نتائج Gemini مع جميع الحمولات وترتيبها بذكاء دون فقدان أي حمولة
     suitability_rank = {"recommended": 0, "caution": 1, "unsuitable": 2}
     merged_list: list[dict] = []
 
@@ -1196,7 +1275,7 @@ def analyze_all_freights_with_gemini(all_audit: list[dict], driver_loc: dict, fo
     result_payload = {
         "enabled": True,
         "status": "partial_error" if batch_errors and not ai_by_key else "ok",
-        "model": GEMINI_MODEL,
+        "model": used_model,
         "cached": False,
         "errors": batch_errors,
         "counts": {
@@ -1227,6 +1306,7 @@ def get_live_hareth_loads():
     use_ai = ai_param not in ("0", "false", "no", "off")
     force_refresh = (request.args.get("refresh_ai", "0") or "0").strip().lower() in ("1", "true", "yes")
 
+    eff_loc = get_effective_hareth_location()
     cookie_header = _get_active_cookie()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -1278,7 +1358,10 @@ def get_live_hareth_loads():
                     break
                 pages_scanned += 1
                 accepted, audit, cards_count, samples = parse_freights_html(
-                    resp.text, lookups_remaining=lookups_remaining, page_num=page
+                    resp.text,
+                    lookups_remaining=lookups_remaining,
+                    page_num=page,
+                    active_loc=eff_loc,
                 )
                 if page == 1:
                     diag["first_page_cards"] = cards_count
@@ -1300,17 +1383,20 @@ def get_live_hareth_loads():
 
         all_accepted.sort(key=lambda x: x["hareth_distance_km"])
 
+        with _MODEL_LOCK:
+            current_model = _ACTIVE_GEMINI_MODEL or GEMINI_MODEL
+
         if use_ai:
             ai_analysis = analyze_all_freights_with_gemini(
                 all_audit=all_audit,
-                driver_loc=dict(hareth_live_location),
+                driver_loc=eff_loc,
                 force_refresh=force_refresh,
             )
         else:
             ai_analysis = {
                 "enabled": False,
                 "status": "disabled_by_query",
-                "model": GEMINI_MODEL,
+                "model": current_model,
                 "summary_ar": "تم تعطيل تحليل Gemini لهذا الطلب.",
                 "ranked_loads": [],
             }
@@ -1318,12 +1404,13 @@ def get_live_hareth_loads():
         payload = {
             "status": "success",
             "driver": "حارث",
-            "gps_active": hareth_live_location.get("lat") is not None,
-            "driver_location": hareth_live_location,
+            "gps_active": bool(eff_loc.get("is_live")),
+            "location_source": eff_loc.get("source"),
+            "driver_location": eff_loc,
             "pages_scanned": pages_scanned,
             "total_raw_before_filter": len(all_audit),
             "total_fetched": len(all_accepted),
-            "sorted_by": "nearest_to_hareth_live_gps",
+            "sorted_by": "nearest_to_hareth_location",
             "vehicle_specs": {
                 "model": "Fiat Ducato L4H2",
                 "max_payload_kg": MAX_PAYLOAD_KG,
@@ -1360,13 +1447,19 @@ def update_cookie():
 
 @app.route("/", methods=["GET", "HEAD"])
 def home():
+    eff_loc = get_effective_hareth_location()
+    with _MODEL_LOCK:
+        current_model = _ACTIVE_GEMINI_MODEL or GEMINI_MODEL
     return jsonify({
         "status": "online",
         "service": "eKurier Hareth Agent",
-        "gps_active": hareth_live_location.get("lat") is not None,
+        "gps_active": bool(eff_loc.get("is_live")),
+        "location_source": eff_loc.get("source"),
+        "driver_location": eff_loc,
         "cookie_configured": bool(_get_active_cookie()),
         "gemini_configured": bool((os.environ.get("GEMINI_API_KEY") or "").strip()),
-        "gemini_model": GEMINI_MODEL,
+        "gemini_model": current_model,
+        "gemini_candidates": GEMINI_CANDIDATE_MODELS,
         "auto_login_status": _LAST_LOGIN_STATUS,
         "login_debug": _LAST_LOGIN_DEBUG,
         "dynamic_cities_count": len(_DYNAMIC_COORDS),
@@ -1382,16 +1475,17 @@ def update_gps():
     if lat is None or lng is None:
         return jsonify({"status": "error", "message": "lat and lng are required"}), 400
 
-    hareth_live_location["lat"] = float(lat)
-    hareth_live_location["lng"] = float(lng)
-    hareth_live_location["accuracy"] = data.get("accuracy")
-    hareth_live_location["speed"] = data.get("speed")
-    hareth_live_location["device"] = data.get("device", "Hareth-Device")
-    hareth_live_location["timestamp"] = data.get("timestamp") or datetime.now(timezone.utc).isoformat()
+    with _LOC_LOCK:
+        hareth_live_location["lat"] = float(lat)
+        hareth_live_location["lng"] = float(lng)
+        hareth_live_location["accuracy"] = data.get("accuracy")
+        hareth_live_location["speed"] = data.get("speed")
+        hareth_live_location["device"] = data.get("device", "Hareth-Device")
+        hareth_live_location["timestamp"] = data.get("timestamp") or datetime.now(timezone.utc).isoformat()
 
     return jsonify({
         "status": "success",
-        "location": hareth_live_location,
+        "location": get_effective_hareth_location(),
     }), 200
 
 
@@ -1399,7 +1493,7 @@ def update_gps():
 def get_gps():
     return jsonify({
         "status": "success",
-        "location": hareth_live_location,
+        "location": get_effective_hareth_location(),
     }), 200
 
 
@@ -1443,3 +1537,8 @@ def loads_after_filter():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+```[cite: 4]
+
+### خطوات التحقق السريعة بعد اللصق والنشر
+* افتح المسار الأساسي `/` وتأكد من أن `location_source` يساوي `"fallback_home"` عند عدم وصول موقع GPS حي، أو `"live_gps"` فور وصول إحداثيات من `/api/update-gps`.
+* اطلب `/api/loads?refresh_ai=1` وتأكد من خلو `ai_analysis.errors` من أخطاء `404` ومن ظهور `ai_analysis.model` الفعّال مع تحليلات `ai_card_ar` و`ai_reason_ar`.
