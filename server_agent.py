@@ -19,26 +19,85 @@ MAX_LENGTH_CM = 375.0
 MAX_WIDTH_CM = 170.0
 MAX_HEIGHT_CM = 195.0
 
-HEAVY_TRUCK_KEYWORDS = [
-    "7.5t", "7.5 t", "12t", "12 t", "18t", "18 t", "24t", "24 t",
-    "40t", "40 t", "sattel", "saddle", "mega", "jumbo", "tautliner",
-    "planensattel", "kühl", "frigo", "reefer", "wechselbrücke", "bdf",
-    "container", "kipper", "autotransporter", "schwertransport",
-    "lkw", "truck", "شاحنة", "تريلا", "مقطورة"
+# كلمات المركبات الثقيلة الفعلية (تُفحص بدقة لتجنب الالتباس مع 3.5t أو أرقام أخرى)
+HEAVY_TRUCK_PATTERNS = [
+    r"\b7[.,]\s*5\s*t(?:on(?:nen|s)?)?\b",
+    r"\b12\s*t(?:on(?:nen|s)?)?\b",
+    r"\b18\s*t(?:on(?:nen|s)?)?\b",
+    r"\b24\s*t(?:on(?:nen|s)?)?\b",
+    r"\b40\s*t(?:on(?:nen|s)?)?\b",
+    r"\bsattel(?:zug|maschine)?\b",
+    r"\bplanensattel\b",
+    r"\bmega(?:trailer)?\b",
+    r"\bjumbo\b",
+    r"\btautliner\b",
+    r"\bwechselbr(?:ü|u)cke\b",
+    r"\bbdf\b",
+    r"\bcontainer\b",
+    r"\bkipper\b",
+    r"\bautotransporter\b",
+    r"\bschwertransport\b",
+    r"\bk(?:ü|u)hl(?:fahrzeug|koffer|lkw|transporter)?\b",
+    r"\bfrigo\b",
+    r"\breefer\b",
+    r"\blkw\b",
+    r"\btruck\b",
+    r"شاحنة",
+    r"تريلا",
+    r"مقطورة",
 ]
 
+# كلمات التحميل والتفريغ والحمولة (إنجليزية + ألمانية + عربية)
 LOADING_LABELS = {
     "loading", "loading:", "beladung", "beladung:",
     "laden", "laden:", "abholung", "abholung:",
-    "abholort", "abholort:", "pickup", "pickup:",
-    "von", "von:"
+    "abholort", "abholort:", "ladeort", "ladeort:",
+    "pickup", "pickup:", "pick up", "pick up:",
+    "von", "von:", "التحميل", "التحميل:"
 }
+
 UNLOADING_LABELS = {
     "unloading", "unloading:", "entladung", "entladung:",
     "entladen", "entladen:", "zustellung", "zustellung:",
-    "zielort", "zielort:", "delivery", "delivery:",
-    "nach", "nach:"
+    "zielort", "zielort:", "abladeort", "abladeort:",
+    "delivery", "delivery:", "nach", "nach:",
+    "التفريغ", "التفريغ:"
 }
+
+CARGO_SECTION_MARKERS = (
+    "goods", "waren", "ware", "ladung", "ladungen",
+    "fracht", "frachten", "sendung", "sendungen",
+    "gut", "güter", "packstücke", "packstück", "packages",
+    "colli", "pallets", "paletten", "palette", "gewicht",
+    "gesamtgewicht", "brutto", "netto", "maße", "abmessungen",
+    "dimensions", "laderaum", "الحمولة", "البضاعة", "الوزن"
+)
+
+VEHICLE_LIMIT_NOISE_PATTERNS = [
+    r"\bbis\s*3[.,]\s*5\s*t\b",
+    r"\bto\s*3[.,]\s*5\s*t\b",
+    r"\b3[.,]\s*5\s*t\b",
+    r"\bzul(?:ä|a)ssiges\s+gesamtgewicht\b",
+    r"\bnutzlast\b",
+    r"\bmax\.?\s*payload\b",
+]
+
+UI_NOISE_PHRASES = (
+    "report a bug",
+    "release hotline",
+    "toggle sidebar",
+    "create new offer",
+    "eigene vorlagen",
+    "my applications",
+    "current freight (",
+    "chat starten",
+    "info@e-kurier.net",
+    "are you sure you want to withdraw",
+    "do you really want to withdraw",
+    "fehler melden",
+    "datenschutz",
+    "impressum",
+)
 
 # ==========================================
 # 2. تخزين موقع حارث الحي والكوكي في الذاكرة
@@ -621,69 +680,182 @@ def extract_city_coords(location_text: str, lookups_remaining: list[int] | None 
     return resolve_city_coords(location_text, lookups_remaining=lookups_remaining)
 
 
-def parse_weight_to_kg(text: str):
-    if not text:
+def _strip_vehicle_class_weights(text: str) -> str:
+    cleaned = text
+    for pat in VEHICLE_LIMIT_NOISE_PATTERNS:
+        cleaned = re.sub(pat, " ", cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
+def _parse_number_eu_us(num_str: str) -> float | None:
+    s = (num_str or "").strip().replace(" ", "")
+    if not s:
         return None
-    lower = text.lower()
-    ton_match = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:t\b|ton\b|tons\b|tonnen\b|طن)', lower)
-    if ton_match:
-        val = float(ton_match.group(1).replace(",", "."))
-        return val * 1000.0
-    kg_match = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:kg\b|كجم|كيلو)', lower)
-    if kg_match:
-        val = float(kg_match.group(1).replace(",", "."))
-        return val
+    # إذا احتوت على نقطة وفاصلة معاً، مثل 1.200,50 أو 1,200.50
+    if "." in s and "," in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "." in s:
+        parts = s.split(".")
+        # إذا كان هناك أكثر من نقطة، أو جزء عشري من 3 أرقام (مثل 24.000 أو 1.200) فهو غالباً فاصل آلاف في الكيلوجرام
+        if len(parts) > 2 or (len(parts) == 2 and len(parts[1]) == 3 and parts[0] != "0"):
+            s = s.replace(".", "")
+    elif "," in s:
+        parts = s.split(",")
+        if len(parts) > 2 or (len(parts) == 2 and len(parts[1]) == 3 and parts[0] != "0"):
+            s = s.replace(",", "")
+        else:
+            s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def parse_weight_to_kg(text: str, lines: list[str] | None = None):
+    """
+    يستخرج وزن البضاعة الفعلي بالكيلوجرام ويتجاهل أوزان فئات المركبات مثل 'Van to 3,5 T' أو 'bis 3,5 t'.
+    """
+    candidate_lines: list[str] = []
+    if lines:
+        for ln in lines:
+            low = ln.lower().strip()
+            if any(noise in low for noise in UI_NOISE_PHRASES):
+                continue
+            if any(m in low for m in CARGO_SECTION_MARKERS) or "•" in ln or "|" in ln or re.search(r"\b(?:kg|ton(?:nen|s)?|t|كجم|كيلو|طن)\b", low):
+                cleaned_ln = _strip_vehicle_class_weights(ln)
+                if cleaned_ln.strip():
+                    candidate_lines.append(cleaned_ln)
+
+    search_pool = "\n".join(candidate_lines) if candidate_lines else _strip_vehicle_class_weights(text or "")
+    if not search_pool.strip():
+        return None
+
+    # أولوية للوزن المقترن بـ kg / كجم / كيلو
+    kg_matches = re.findall(r'([0-9][0-9.,\s]*[0-9]|[0-9])\s*(?:kg\b|كجم|كيلو)', search_pool, flags=re.IGNORECASE)
+    parsed_kg = []
+    for raw_num in kg_matches:
+        val = _parse_number_eu_us(raw_num)
+        if val is not None and 0 < val < 100000:
+            parsed_kg.append(val)
+    if parsed_kg:
+        # في بطاقات e-kurier يظهر الوزن الإجمالي بعد | ثم أوزان القطع؛ نأخذ أكبر وزن إجمالي منطقي أو الأول
+        return max(parsed_kg) if len(parsed_kg) > 1 and max(parsed_kg) <= 50000 else parsed_kg[0]
+
+    # ثانياً للوزن المقترن بـ ton / tonnen / t / طن بعد إزالة حدود فئات المركبات
+    ton_matches = re.findall(r'([0-9][0-9.,\s]*[0-9]|[0-9])\s*(?:tonnen\b|tons\b|ton\b|t\b|طن)', search_pool, flags=re.IGNORECASE)
+    for raw_num in ton_matches:
+        val = _parse_number_eu_us(raw_num)
+        if val is not None and 0 < val < 100:
+            return round(val * 1000.0, 2)
+
     return None
 
 
-def evaluate_load_for_ducato(load_text: str):
-    lower = load_text.lower()
-
-    for kw in HEAVY_TRUCK_KEYWORDS:
-        if kw in lower:
-            return False, f"كلمة شاحنة ثقيلة: {kw}"
-
-    weight_kg = parse_weight_to_kg(lower)
-    if weight_kg is not None and weight_kg > MAX_PAYLOAD_KG:
-        return False, f"الوزن {weight_kg} كجم يتجاوز {MAX_PAYLOAD_KG} كجم"
-
+def _extract_dimensions_cm(text: str) -> list[tuple[float, float, float | None]]:
+    results = []
     dim_matches = re.findall(
-        r'(\d+(?:[.,]\d+)?)\s*[x×]\s*(\d+(?:[.,]\d+)?)(?:\s*[x×]\s*(\d+(?:[.,]\d+)?))?\s*(cm|m\b|سم|متر)?',
-        lower
+        r'(\d+(?:[.,]\d+)?)\s*[x×]\s*(\d+(?:[.,]\d+)?)(?:\s*[x×]\s*(\d+(?:[.,]\d+)?))?\s*(cm|mm|m\b|meter\b|سم|ملم|متر)?',
+        text or "",
+        flags=re.IGNORECASE,
     )
     for m in dim_matches:
-        unit = m[3] or ""
-        factor = 100.0 if ("m" in unit and "cm" not in unit) or "متر" in unit else 1.0
-        dims = []
-        for x in (m[0], m[1], m[2]):
-            if x:
-                dims.append(float(x.replace(",", ".")) * factor)
-        if dims:
-            dims_sorted = sorted(dims, reverse=True)
-            if dims_sorted[0] > MAX_LENGTH_CM:
-                return False, f"طول {dims_sorted[0]} سم يتجاوز {MAX_LENGTH_CM} سم"
-            if len(dims_sorted) > 1 and dims_sorted[1] > MAX_WIDTH_CM:
-                return False, f"عرض {dims_sorted[1]} سم يتجاوز {MAX_WIDTH_CM} سم"
-            if len(dims_sorted) > 2 and dims_sorted[2] > MAX_HEIGHT_CM:
-                return False, f"ارتفاع {dims_sorted[2]} سم يتجاوز {MAX_HEIGHT_CM} سم"
+        unit = (m[3] or "cm").lower()
+        if "mm" in unit or "ملم" in unit:
+            factor = 0.1
+        elif ("m" in unit and "cm" not in unit and "mm" not in unit) or "متر" in unit:
+            factor = 100.0
+        else:
+            factor = 1.0
 
-    return True, "مناسب لـ Fiat Ducato L4H2"
+        d1 = _parse_number_eu_us(m[0])
+        d2 = _parse_number_eu_us(m[1])
+        d3 = _parse_number_eu_us(m[2]) if m[2] else None
+        if d1 is None or d2 is None:
+            continue
+        dims = [d1 * factor, d2 * factor]
+        if d3 is not None:
+            dims.append(d3 * factor)
+        dims_sorted = sorted(dims, reverse=True)
+        length_cm = round(dims_sorted[0], 1)
+        width_cm = round(dims_sorted[1], 1)
+        height_cm = round(dims_sorted[2], 1) if len(dims_sorted) > 2 else None
+        results.append((length_cm, width_cm, height_cm))
+    return results
+
+
+def evaluate_load_for_ducato(load_text: str, lines: list[str] | None = None, weight_kg: float | None = None):
+    lower = (load_text or "").lower()
+    warnings: list[str] = []
+
+    for pat in HEAVY_TRUCK_PATTERNS:
+        match = re.search(pat, lower, flags=re.IGNORECASE)
+        if match:
+            matched_token = match.group(0).strip()
+            return False, f"كلمة شاحنة ثقيلة: {matched_token}", weight_kg, warnings
+
+    if weight_kg is None:
+        weight_kg = parse_weight_to_kg(lower, lines=lines)
+
+    if weight_kg is not None and weight_kg > MAX_PAYLOAD_KG:
+        return False, f"الوزن {weight_kg} كجم يتجاوز {MAX_PAYLOAD_KG} كجم", weight_kg, warnings
+
+    dim_tuples = _extract_dimensions_cm(lower)
+    for length_cm, width_cm, height_cm in dim_tuples:
+        if length_cm <= 5.0 and width_cm <= 5.0:
+            warnings.append(f"أبعاد غير دقيقة/ناقصة في الإعلان: {length_cm}x{width_cm}")
+            continue
+        if length_cm > MAX_LENGTH_CM:
+            return False, f"طول {length_cm} سم يتجاوز {MAX_LENGTH_CM} سم", weight_kg, warnings
+        if width_cm > MAX_WIDTH_CM:
+            return False, f"عرض {width_cm} سم يتجاوز {MAX_WIDTH_CM} سم", weight_kg, warnings
+        if height_cm is not None and height_cm > MAX_HEIGHT_CM:
+            return False, f"ارتفاع {height_cm} سم يتجاوز {MAX_HEIGHT_CM} سم", weight_kg, warnings
+
+    if not dim_tuples:
+        warnings.append("الأبعاد غير مذكورة في نص العرض")
+
+    return True, "مناسب لـ Fiat Ducato L4H2", weight_kg, warnings
+
+
+def _is_ui_or_hotline_entry(origin: str, destination: str, joined_lower: str) -> bool:
+    if any(phrase in joined_lower for phrase in UI_NOISE_PHRASES):
+        return True
+    orig_clean = (origin or "").strip()
+    dest_clean = (destination or "").strip()
+    if re.fullmatch(r"\+?\d[\d\s\-/()]{6,}", orig_clean) or re.fullmatch(r"\+?\d[\d\s\-/()]{6,}", dest_clean):
+        return True
+    if orig_clean == "غير محدد" and dest_clean == "غير محدد":
+        return True
+    return False
 
 
 def _looks_like_freight_card(text_lower: str) -> bool:
+    if any(phrase in text_lower for phrase in UI_NOISE_PHRASES):
+        return False
     markers = (
         "loading", "unloading", "beladung", "entladung",
         "laden", "entladen", "abholung", "zustellung",
-        "abholort", "zielort", "pickup", "delivery"
+        "abholort", "zielort", "pickup", "delivery",
+        "التحميل", "التفريغ"
     )
     if any(m in text_lower for m in markers):
         return True
     has_km = bool(re.search(r'\b\d+(?:[.,]\d+)?\s*km\b', text_lower))
-    has_cargo_hint = any(k in text_lower for k in ("kg", "ton", "colli", "pallet", "palette", "goods", "distance", "entfernung"))
+    has_cargo_hint = any(k in text_lower for k in CARGO_SECTION_MARKERS) or bool(re.search(r'\b\d+(?:[.,]\d+)?\s*kg\b', text_lower))
     return has_km and has_cargo_hint
 
 
-def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = None):
+def _extract_offer_id(offer_url: str) -> str | None:
+    if not offer_url:
+        return None
+    m = re.search(r"/freights/(\d+)", offer_url)
+    return m.group(1) if m else None
+
+
+def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = None, page_num: int = 1):
     soup = BeautifulSoup(html_text, "html.parser")
     raw_items = []
     sample_cards = []
@@ -703,13 +875,13 @@ def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = No
             continue
 
         joined_text = " | ".join(lines)
-        if len(sample_cards) < 2 and len(joined_text) > 20:
+        joined_lower = joined_text.lower()
+        if len(sample_cards) < 2 and len(joined_text) > 20 and not any(p in joined_lower for p in UI_NOISE_PHRASES):
             sample_cards.append(joined_text[:180])
 
-        if not _looks_like_freight_card(joined_text.lower()):
+        if not _looks_like_freight_card(joined_lower):
             continue
 
-        idx += 1
         origin = "غير محدد"
         destination = "غير محدد"
         for i, line in enumerate(lines):
@@ -722,14 +894,20 @@ def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = No
         if origin == "غير محدد" or destination == "غير محدد":
             place_candidates = [
                 ln for ln in lines
-                if re.search(r'\b\d{2,5}\b', ln) and not re.search(r'\b\d+(?:[.,]\d+)?\s*km\b', ln.lower())
+                if re.search(r'\b\d{2,5}\b', ln)
+                and not re.search(r'\b\d+(?:[.,]\d+)?\s*km\b', ln.lower())
+                and not re.search(r'\b\d{1,2}:\d{2}\b', ln)
             ]
             if origin == "غير محدد" and len(place_candidates) >= 1:
                 origin = place_candidates[0]
             if destination == "غير محدد" and len(place_candidates) >= 2:
                 destination = place_candidates[1]
 
-        dist_match = re.search(r'(\d+(?:[.,]\d+)?)\s*km', joined_text.lower())
+        if _is_ui_or_hotline_entry(origin, destination, joined_lower):
+            continue
+
+        idx += 1
+        dist_match = re.search(r'(\d+(?:[.,]\d+)?)\s*km', joined_lower)
         distance_km = float(dist_match.group(1).replace(",", ".")) if dist_match else 0.0
         floor_price = round(distance_km * 1.56, 2) if distance_km > 0 else 0.0
 
@@ -745,21 +923,28 @@ def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = No
         href = link_el["href"] if link_el else ""
         if href and href.startswith("/"):
             offer_url = f"https://e-kurier.net{href}"
-        elif href.startswith("http"):
+        elif href and href.startswith("http"):
             offer_url = href
         else:
             offer_url = "https://e-kurier.net/portal/freights"
 
-        accepted, reason = evaluate_load_for_ducato(joined_text)
+        parsed_weight = parse_weight_to_kg(joined_lower, lines=lines)
+        accepted, reason, cargo_weight_kg, warnings = evaluate_load_for_ducato(
+            joined_lower, lines=lines, weight_kg=parsed_weight
+        )
 
         item = {
             "id": idx,
+            "page": page_num,
+            "offer_id": _extract_offer_id(offer_url),
             "origin": origin,
             "destination": destination,
             "distance_km": distance_km,
             "floor_price": floor_price,
             "hareth_distance_km": hareth_distance_km,
             "max_payload_kg": MAX_PAYLOAD_KG,
+            "cargo_weight_kg": cargo_weight_kg,
+            "warnings": warnings,
             "offer_url": offer_url,
             "raw_lines": lines[:45],
             "vehicle_match": "Fiat Ducato L4H2",
@@ -829,7 +1014,7 @@ def get_live_hareth_loads():
                     break
                 pages_scanned += 1
                 accepted, audit, cards_count, samples = parse_freights_html(
-                    resp.text, lookups_remaining=lookups_remaining
+                    resp.text, lookups_remaining=lookups_remaining, page_num=page
                 )
                 if page == 1:
                     diag["first_page_cards"] = cards_count
