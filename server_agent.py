@@ -579,7 +579,7 @@ def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = No
     accepted_loads = [x for x in raw_items if x["accepted"]]
     accepted_loads.sort(key=lambda x: x["hareth_distance_km"])
 
-    return accepted_loads, raw_items
+    return accepted_loads, raw_items, len(cards)
 
 
 def get_live_hareth_loads():
@@ -598,20 +598,46 @@ def get_live_hareth_loads():
     all_audit = []
     pages_scanned = 0
     lookups_remaining = [5]
+    diag = {
+        "cookie_configured": bool(cookie_header),
+        "first_page_status": None,
+        "first_page_length": 0,
+        "first_page_cards": 0,
+        "first_page_snippet": "",
+    }
 
     try:
         with httpx.Client(timeout=15.0, headers=headers, follow_redirects=True) as client:
             for page in range(1, max_pages + 1):
                 url = f"https://e-kurier.net/portal/freights?page={page}"
                 resp = client.get(url)
+                if page == 1:
+                    diag["first_page_status"] = resp.status_code
+                    diag["first_page_length"] = len(resp.text or "")
+                    clean_snippet = re.sub(r"\s+", " ", (resp.text or "")).strip()[:350]
+                    diag["first_page_snippet"] = clean_snippet
+
                 if resp.status_code != 200 or not resp.text.strip():
                     break
                 pages_scanned += 1
-                accepted, audit = parse_freights_html(resp.text, lookups_remaining=lookups_remaining)
+                accepted, audit, cards_count = parse_freights_html(
+                    resp.text, lookups_remaining=lookups_remaining
+                )
+                if page == 1:
+                    diag["first_page_cards"] = cards_count
+
                 if not audit:
                     break
                 all_accepted.extend(accepted)
                 all_audit.extend(audit)
+
+        if not all_audit:
+            print(
+                f"[DIAGNOSTIC] empty loads: status={diag['first_page_status']} "
+                f"len={diag['first_page_length']} cards={diag['first_page_cards']} "
+                f"cookie={diag['cookie_configured']} snippet={diag['first_page_snippet']!r}",
+                flush=True,
+            )
 
         all_accepted.sort(key=lambda x: x["hareth_distance_km"])
 
@@ -634,6 +660,7 @@ def get_live_hareth_loads():
             },
             "loads": all_accepted,
             "audit_comparison": all_audit,
+            "diagnostics": diag,
         }
         return jsonify(payload), 200
     except Exception as e:
