@@ -2,6 +2,7 @@ import os
 import re
 import math
 import time
+from datetime import datetime
 import httpx
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
@@ -82,6 +83,7 @@ EU_CITIES_COORDS = {
     "bonn": (50.7374, 7.0982)
 }
 
+
 def normalize_url(href):
     if not href:
         return None
@@ -93,6 +95,7 @@ def normalize_url(href):
     if href.startswith("/"):
         return f"https://e-kurier.net{href}"
     return f"https://e-kurier.net/portal/{href}"
+
 
 def extract_card_url(card, fallback_url="https://e-kurier.net/portal/freights"):
     for attr in ["href", "data-href", "data-url"]:
@@ -112,6 +115,7 @@ def extract_card_url(card, fallback_url="https://e-kurier.net/portal/freights"):
             return norm
 
     return fallback_url
+
 
 def get_active_client():
     current_time = time.time()
@@ -159,6 +163,7 @@ def get_active_client():
         print(f"❌ [SESSION ERROR]: {e}")
         return client
 
+
 def is_suitable_for_fiat_ducato(card_text):
     text_lower = card_text.lower()
     heavy_truck_keywords = [
@@ -180,13 +185,21 @@ def is_suitable_for_fiat_ducato(card_text):
 
     return True
 
-def calculate_fast_road_distance(h_lat, h_lng, card_text):
-    target_coords = None
-    text_lower = card_text.lower()
 
-    for city, coords in EU_CITIES_COORDS.items():
-        if city in text_lower:
-            target_coords = coords
+def calculate_fast_road_distance(h_lat, h_lng, lines):
+    ordered_texts = []
+    if lines:
+        ordered_texts.append(lines[0].lower())
+        ordered_texts.append(" ".join(lines[:2]).lower())
+    ordered_texts.append(" ".join(lines).lower())
+
+    target_coords = None
+    for candidate_text in ordered_texts:
+        for city, coords in EU_CITIES_COORDS.items():
+            if city in candidate_text:
+                target_coords = coords
+                break
+        if target_coords:
             break
 
     if target_coords:
@@ -204,7 +217,8 @@ def calculate_fast_road_distance(h_lat, h_lng, card_text):
         road_dist = R * c * 1.25
         return round(road_dist, 1)
 
-    return 500.0
+    return 9999.0
+
 
 @app.route("/api/update-gps", methods=["POST"])
 def update_gps():
@@ -213,11 +227,14 @@ def update_gps():
         if data and 'lat' in data and 'lng' in data:
             REAL_DRIVER_LOCATION['lat'] = float(data['lat'])
             REAL_DRIVER_LOCATION['lng'] = float(data['lng'])
-            REAL_DRIVER_LOCATION['timestamp'] = data.get('timestamp', 'محدث الآن')
+            REAL_DRIVER_LOCATION['timestamp'] = data.get(
+                'timestamp', datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            )
             return jsonify({"status": "success", "location": REAL_DRIVER_LOCATION}), 200
         return jsonify({"status": "error", "message": "بيانات غير صالحة"}), 400
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @app.route("/api/get-gps", methods=["GET"])
 def get_gps():
@@ -227,106 +244,6 @@ def get_gps():
         "location": REAL_DRIVER_LOCATION
     }), 200
 
+
 @app.route("/api/loads", methods=["GET"])
-def get_live_hareth_loads():
-    try:
-        req_lat = request.args.get('lat', type=float)
-        req_lng = request.args.get('lng', type=float)
-
-        if req_lat is not None and req_lng is not None:
-            hareth_lat, hareth_lng = req_lat, req_lng
-            REAL_DRIVER_LOCATION['lat'] = hareth_lat
-            REAL_DRIVER_LOCATION['lng'] = hareth_lng
-        else:
-            hareth_lat = REAL_DRIVER_LOCATION.get('lat')
-            hareth_lng = REAL_DRIVER_LOCATION.get('lng')
-
-        client = get_active_client()
-        freights_url = "https://e-kurier.net/portal/freights"
-
-        seen_signatures = set()
-        raw_items = []
-
-        for page_num in range(1, 3):
-            target_page = f"{freights_url}?page={page_num}"
-            response = client.get(target_page)
-
-            if "login" in str(response.url).lower():
-                SESSION_STORE["client"] = None
-                client = get_active_client()
-                response = client.get(target_page)
-
-            if response.status_code == 200 and "login" not in str(response.url).lower():
-                soup = BeautifulSoup(response.text, 'html.parser')
-                cards = soup.find_all('article')
-                if not cards:
-                    cards = soup.select('div[class*="freight"], tr, div[class*="card"], li[class*="load"]')
-
-                for card in cards:
-                    text = card.get_text(separator='\n', strip=True)
-                    if len(text) > 15 and is_suitable_for_fiat_ducato(text):
-                        lines = [line.strip() for line in text.split('\n') if line.strip()]
-                        sig = tuple(lines)
-                        if sig not in seen_signatures:
-                            seen_signatures.add(sig)
-                            offer_url = extract_card_url(card, fallback_url=target_page)
-                            raw_items.append({
-                                "lines": lines,
-                                "offer_url": offer_url
-                            })
-
-        formatted_loads = []
-        for idx, item in enumerate(raw_items, start=1):
-            lines = item["lines"]
-            full_text = " | ".join(lines)
-            origin = lines[0] if len(lines) > 0 else "غير محدد"
-            destination = lines[1] if len(lines) > 1 else "غير محدد"
-
-            distance_km = 100.0
-            for line in lines:
-                if "km" in line.lower() or "كم" in line:
-                    nums = re.findall(r'\d+', line)
-                    if nums:
-                        distance_km = float(nums[0])
-                        break
-
-            hareth_distance = 150.0
-            if hareth_lat is not None and hareth_lng is not None:
-                hareth_distance = calculate_fast_road_distance(hareth_lat, hareth_lng, full_text)
-
-            floor_price = round(distance_km * 1.3 * 1.2, 2)
-
-            formatted_loads.append({
-                "id": idx,
-                "origin": origin,
-                "destination": destination,
-                "distance_km": distance_km,
-                "hareth_distance_km": hareth_distance,
-                "floor_price": floor_price,
-                "vehicle_match": "Fiat Ducato L4H2",
-                "offer_url": item["offer_url"],
-                "raw_lines": lines
-            })
-
-        if hareth_lat is not None and hareth_lng is not None:
-            formatted_loads.sort(key=lambda x: x['hareth_distance_km'])
-
-        return jsonify({
-            "status": "success",
-            "driver": "حارث",
-            "gps_active": hareth_lat is not None,
-            "driver_location": REAL_DRIVER_LOCATION,
-            "total_fetched": len(formatted_loads),
-            "loads": formatted_loads
-        }), 200
-
-    except Exception as e:
-        print(f"❌ [CRITICAL ERROR]: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route("/", methods=["GET"])
-def home_root():
-    return jsonify({"status": "online", "message": "E-Kurier Direct Offer Link Agent Active"})
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+def get_live_hareth_
