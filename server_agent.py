@@ -37,6 +37,7 @@ GEMINI_CANDIDATE_MODELS = list(dict.fromkeys([
 GEMINI_MODEL = GEMINI_CANDIDATE_MODELS[0] if GEMINI_CANDIDATE_MODELS else "gemini-4-hydrogen"
 
 GEMINI_BATCH_SIZE = max(5, min(int(os.environ.get("GEMINI_BATCH_SIZE", "18")), 40))
+GEMINI_RETRY_429_WAIT_SEC = max(1.0, min(float(os.environ.get("GEMINI_RETRY_429_WAIT_SEC", "4.0")), 20.0))
 AI_CACHE_TTL_SEC = max(15, min(int(os.environ.get("AI_CACHE_TTL_SEC", "120")), 900))
 
 HEAVY_TRUCK_PATTERNS = [
@@ -1135,46 +1136,55 @@ def _call_gemini_batch(api_key: str, batch_items: list[dict], driver_loc: dict) 
     ]
 
     last_err: Exception | None = None
+    prompt_text = f"{system_instruction}\n\n{json.dumps(user_prompt, ensure_ascii=False)}"
+
     for model_name in models_to_try:
         clean_model = model_name.replace("models/", "").strip()
         if not clean_model:
             continue
+
         for api_ver in ("v1beta", "v1"):
             url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{clean_model}:generateContent"
             payload = {
-                "contents": [{"parts": [{"text": f"{system_instruction}\n\n{json.dumps(user_prompt, ensure_ascii=False)}"}]}],
+                "contents": [{"parts": [{"text": prompt_text}]}],
                 "generationConfig": {
                     "temperature": 0.2,
                     "responseMimeType": "application/json",
                 },
             }
-            try:
-                with httpx.Client(timeout=25.0) as client:
-                    resp = client.post(url, params={"key": api_key}, json=payload)
-                    resp.raise_for_status()
-                    body = resp.json()
 
-                with _MODEL_LOCK:
-                    _ACTIVE_GEMINI_MODEL = clean_model
+            max_attempts = 2
+            for attempt in range(max_attempts):
+                try:
+                    with httpx.Client(timeout=20.0) as client:
+                        resp = client.post(url, params={"key": api_key}, json=payload)
+                        resp.raise_for_status()
+                        body = resp.json()
 
-                candidates = body.get("candidates") or []
-                if not candidates:
-                    return [], clean_model
-                parts = ((candidates[0].get("content") or {}).get("parts")) or []
-                text_out = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
-                parsed = _extract_json_object(text_out)
-                if not parsed or not isinstance(parsed.get("items"), list):
-                    return [], clean_model
-                return [x for x in parsed["items"] if isinstance(x, dict)], clean_model
-            except httpx.HTTPStatusError as e:
-                last_err = e
-                status_code = e.response.status_code if e.response is not None else None
-                if status_code in (400, 404, 503):
-                    continue
-                raise
-            except Exception as e:
-                last_err = e
-                continue
+                    with _MODEL_LOCK:
+                        _ACTIVE_GEMINI_MODEL = clean_model
+
+                    candidates = body.get("candidates") or []
+                    if not candidates:
+                        return [], clean_model
+                    parts = ((candidates[0].get("content") or {}).get("parts")) or []
+                    text_out = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+                    parsed = _extract_json_object(text_out)
+                    if not parsed or not isinstance(parsed.get("items"), list):
+                        return [], clean_model
+                    return [x for x in parsed["items"] if isinstance(x, dict)], clean_model
+                except httpx.HTTPStatusError as e:
+                    last_err = e
+                    status_code = e.response.status_code if e.response is not None else None
+                    if status_code == 429 and attempt + 1 < max_attempts:
+                        time.sleep(GEMINI_RETRY_429_WAIT_SEC)
+                        continue
+                    if status_code in (400, 404, 429, 503):
+                        break
+                    raise
+                except Exception as e:
+                    last_err = e
+                    break
 
     if last_err:
         raise last_err
