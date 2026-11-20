@@ -180,7 +180,7 @@ def get_active_client():
         "Accept-Language": "en-US,en;q=0.5",
     }
 
-    client = httpx.Client(headers=headers, follow_redirects=True, timeout=30.0)
+    client = httpx.Client(headers=headers, follow_redirects=True, timeout=15.0)
     try:
         login_page_url = "https://e-kurier.net/portal/login"
         login_page = client.get(login_page_url)
@@ -433,7 +433,7 @@ def get_live_hareth_loads():
         req_lat = request.args.get("lat", type=float)
         req_lng = request.args.get("lng", type=float)
         max_distance_km = request.args.get("max_km", type=float)
-        max_pages = request.args.get("max_pages", default=25, type=int)
+        max_pages = request.args.get("max_pages", default=10, type=int)
         max_pages = max(1, min(max_pages, 50))
 
         if req_lat is not None and req_lng is not None:
