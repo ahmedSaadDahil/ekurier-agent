@@ -5,6 +5,7 @@ import math
 import re
 import os
 import json
+import hashlib
 import threading
 import time
 from datetime import datetime, timezone
@@ -19,7 +20,10 @@ MAX_LENGTH_CM = 375.0
 MAX_WIDTH_CM = 170.0
 MAX_HEIGHT_CM = 195.0
 
-# كلمات المركبات الثقيلة الفعلية (تُفحص بدقة لتجنب الالتباس مع 3.5t أو أرقام أخرى)
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+GEMINI_BATCH_SIZE = max(5, min(int(os.environ.get("GEMINI_BATCH_SIZE", "18")), 40))
+AI_CACHE_TTL_SEC = max(15, min(int(os.environ.get("AI_CACHE_TTL_SEC", "120")), 900))
+
 HEAVY_TRUCK_PATTERNS = [
     r"\b7[.,]\s*5\s*t(?:on(?:nen|s)?)?\b",
     r"\b12\s*t(?:on(?:nen|s)?)?\b",
@@ -47,7 +51,6 @@ HEAVY_TRUCK_PATTERNS = [
     r"مقطورة",
 ]
 
-# كلمات التحميل والتفريغ والحمولة (إنجليزية + ألمانية + عربية)
 LOADING_LABELS = {
     "loading", "loading:", "beladung", "beladung:",
     "laden", "laden:", "abholung", "abholung:",
@@ -96,8 +99,16 @@ UI_NOISE_PHRASES = (
     "impressum",
 )
 
+CARD_ACTION_NOISE = {
+    "details", "chat", "mark", "ignore", "withdraw",
+    "cancel", "yes", "chat starten", "email",
+    "are you sure you want to withdraw your offer?",
+    "are you sure??",
+    "do you really want to withdraw the freight offer?",
+}
+
 # ==========================================
-# 2. تخزين موقع حارث الحي والكوكي في الذاكرة
+# 2. تخزين موقع حارث الحي والكوكي والكاش في الذاكرة
 # ==========================================
 hareth_live_location = {
     "lat": None,
@@ -112,6 +123,9 @@ _COOKIE_LOCK = threading.Lock()
 _RUNTIME_COOKIE: str | None = None
 _LAST_LOGIN_STATUS: str = "not_attempted"
 _LAST_LOGIN_DEBUG: dict = {}
+
+_AI_CACHE_LOCK = threading.Lock()
+_AI_CACHE: dict[str, tuple[float, dict]] = {}
 
 # ==========================================
 # 3. قاموس إحداثيات المدن الأوروبية وألمانيا
@@ -710,9 +724,6 @@ def _parse_number_eu_us(num_str: str) -> float | None:
 
 
 def parse_weight_to_kg(text: str, lines: list[str] | None = None):
-    """
-    يستخرج وزن البضاعة الفعلي بالكيلوجرام ويتجاهل أوزان فئات المركبات مثل 'Van to 3,5 T' أو 'bis 3,5 t'.
-    """
     candidate_lines: list[str] = []
     if lines:
         for ln in lines:
@@ -799,6 +810,8 @@ def evaluate_load_for_ducato(load_text: str, lines: list[str] | None = None, wei
         if length_cm <= 5.0 and width_cm <= 5.0:
             warnings.append(f"أبعاد غير دقيقة/ناقصة في الإعلان: {length_cm}x{width_cm}")
             continue
+        if length_cm > 500.0 or width_cm > 500.0:
+            warnings.append("أبعاد كبيرة جداً (قد تكون مكتوبة بالمليمتر أو خاطئة في الإعلان)")
         if length_cm > MAX_LENGTH_CM:
             return False, f"طول {length_cm} سم يتجاوز {MAX_LENGTH_CM} سم", weight_kg, warnings
         if width_cm > MAX_WIDTH_CM:
@@ -958,9 +971,261 @@ def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = No
     return accepted_loads, raw_items, len(cards), sample_cards
 
 
+# ==========================================
+# 5. تحليل وترتيب كامل الحمولات عبر Gemini
+# ==========================================
+def _compact_load_for_gemini(item: dict) -> dict:
+    clean_lines = []
+    for ln in (item.get("raw_lines") or []):
+        s = (ln or "").strip()
+        if not s or s.lower() in CARD_ACTION_NOISE:
+            continue
+        if s not in clean_lines:
+            clean_lines.append(s)
+        if len(clean_lines) >= 24:
+            break
+
+    return {
+        "id": item.get("id"),
+        "page": item.get("page"),
+        "offer_id": item.get("offer_id"),
+        "origin": item.get("origin"),
+        "destination": item.get("destination"),
+        "distance_km": item.get("distance_km"),
+        "floor_price": item.get("floor_price"),
+        "hareth_distance_km": item.get("hareth_distance_km"),
+        "cargo_weight_kg": item.get("cargo_weight_kg"),
+        "warnings": item.get("warnings") or [],
+        "accepted_by_rule": item.get("accepted"),
+        "rule_reason": item.get("filter_reason"),
+        "offer_url": item.get("offer_url"),
+        "details": clean_lines,
+    }
+
+
+def _extract_json_object(raw_text: str) -> dict | None:
+    txt = (raw_text or "").strip()
+    if not txt:
+        return None
+    txt = re.sub(r"^```(?:json)?\s*", "", txt, flags=re.IGNORECASE)
+    txt = re.sub(r"\s*```$", "", txt).strip()
+    try:
+        parsed = json.loads(txt)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", txt, flags=re.DOTALL)
+    if m:
+        try:
+            parsed = json.loads(m.group(0))
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+    return None
+
+
+def _call_gemini_batch(api_key: str, batch_items: list[dict], driver_loc: dict) -> list[dict]:
+    system_instruction = (
+        "أنت مساعد لوجستي ذكي للسائق حارث الذي يقود سيارة Fiat Ducato L4H2 "
+        "(الحد الأقصى للحمولة 1360 كجم، الأبعاد الداخلية 375x170x195 سم). "
+        "تحلل الحمولات المرسلة باللغتين الألمانية والإنجليزية وتعيد JSON فقط دون أي نص إضافي. "
+        "لكل حمولة في الدفعة قيّم ملاءمتها العملية، ورتبها من الأفضل للأسوأ لحارث مع مراعاة: "
+        "1) مطابقة الوزن والأبعاد والمركبة فعلياً (وتنبيه إذا كان المعلن كتب أبعاداً غريبة مثل 1200x800x1200 أو 4x2x2 أو لم يذكر الأبعاد أو ذكر وجهة جزيرة بعيدة مثل جزر الكناري/مايوركا). "
+        "2) القرب من موقع حارث إذا كان متوفراً (hareth_distance_km < 9000). "
+        "3) وضوح المسافة والمواعيد والجدوى."
+    )
+
+    user_prompt = {
+        "driver": "حارث",
+        "driver_location": driver_loc,
+        "vehicle_specs": {
+            "model": "Fiat Ducato L4H2",
+            "max_payload_kg": MAX_PAYLOAD_KG,
+            "max_length_cm": MAX_LENGTH_CM,
+            "max_width_cm": MAX_WIDTH_CM,
+            "max_height_cm": MAX_HEIGHT_CM,
+        },
+        "output_schema": {
+            "items": [
+                {
+                    "id": "int",
+                    "offer_id": "string|null",
+                    "ai_suitability": "recommended | caution | unsuitable",
+                    "ai_score": "number (0 to 100)",
+                    "ai_reason_ar": "سبب مختصر وواضح بالعربية لحارث",
+                    "ai_card_ar": "بطاقة عرض مختصرة جاهزة لحارث تتضمن المسار، المسافة، الوزن/الأبعاد، السعر الأدنى، والملاحظة"
+                }
+            ]
+        },
+        "freights_batch": batch_items,
+    }
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    payload = {
+        "system_instruction": {"parts": [{"text": system_instruction}]},
+        "contents": [{"parts": [{"text": json.dumps(user_prompt, ensure_ascii=False)}]}],
+        "generationConfig": {
+            "temperature": 0.2,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    with httpx.Client(timeout=25.0) as client:
+        resp = client.post(url, params={"key": api_key}, json=payload)
+        resp.raise_for_status()
+        body = resp.json()
+
+    candidates = body.get("candidates") or []
+    if not candidates:
+        return []
+    parts = ((candidates[0].get("content") or {}).get("parts")) or []
+    text_out = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+    parsed = _extract_json_object(text_out)
+    if not parsed or not isinstance(parsed.get("items"), list):
+        return []
+    return [x for x in parsed["items"] if isinstance(x, dict)]
+
+
+def analyze_all_freights_with_gemini(all_audit: list[dict], driver_loc: dict, force_refresh: bool = False) -> dict:
+    api_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not api_key:
+        return {
+            "enabled": False,
+            "status": "missing_gemini_api_key",
+            "model": GEMINI_MODEL,
+            "summary_ar": "لم يتم ضبط GEMINI_API_KEY على السيرفر بعد.",
+            "ranked_loads": [],
+        }
+
+    if not all_audit:
+        return {
+            "enabled": True,
+            "status": "empty_loads",
+            "model": GEMINI_MODEL,
+            "summary_ar": "لا توجد حمولات متاحة لتحليلها حالياً.",
+            "ranked_loads": [],
+        }
+
+    compact_all = [_compact_load_for_gemini(item) for item in all_audit]
+    cache_sig = hashlib.sha256(
+        json.dumps(
+            {"loc": driver_loc, "items": compact_all},
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+    now = time.time()
+    if not force_refresh:
+        with _AI_CACHE_LOCK:
+            cached = _AI_CACHE.get(cache_sig)
+            if cached and (now - cached[0]) <= AI_CACHE_TTL_SEC:
+                res = dict(cached[1])
+                res["cached"] = True
+                return res
+
+    ai_by_key: dict[str, dict] = {}
+    batch_errors: list[str] = []
+
+    for start in range(0, len(compact_all), GEMINI_BATCH_SIZE):
+        batch = compact_all[start : start + GEMINI_BATCH_SIZE]
+        try:
+            batch_results = _call_gemini_batch(api_key, batch, driver_loc)
+            for r in batch_results:
+                oid = str(r.get("offer_id") or "").strip()
+                iid = str(r.get("id") or "").strip()
+                if oid:
+                    ai_by_key[f"oid:{oid}"] = r
+                if iid:
+                    ai_by_key[f"id:{iid}"] = r
+        except Exception as e:
+            batch_errors.append(f"{type(e).__name__}: {str(e)[:120]}")
+
+    # دمج نتائج Gemini مع جميع الحمولات وترتيبها بذكاء دون فقدان أي حمولة
+    suitability_rank = {"recommended": 0, "caution": 1, "unsuitable": 2}
+    merged_list: list[dict] = []
+
+    for item in all_audit:
+        oid = str(item.get("offer_id") or "").strip()
+        iid = str(item.get("id") or "").strip()
+        ai_meta = ai_by_key.get(f"oid:{oid}") or ai_by_key.get(f"id:{iid}") or {}
+
+        suit = str(ai_meta.get("ai_suitability") or ("recommended" if item.get("accepted") else "unsuitable")).lower()
+        if suit not in suitability_rank:
+            suit = "recommended" if item.get("accepted") else "unsuitable"
+
+        try:
+            score = float(ai_meta.get("ai_score", 80.0 if item.get("accepted") else 20.0))
+        except Exception:
+            score = 80.0 if item.get("accepted") else 20.0
+
+        reason_ar = str(ai_meta.get("ai_reason_ar") or item.get("filter_reason") or "").strip()
+        card_ar = str(ai_meta.get("ai_card_ar") or "").strip()
+        if not card_ar:
+            w_str = f"{item.get('cargo_weight_kg')} كجم" if item.get("cargo_weight_kg") is not None else "غير محدد"
+            card_ar = (
+                f"{item.get('origin')} → {item.get('destination')} | "
+                f"المسافة: {item.get('distance_km')} كم | الوزن: {w_str} | "
+                f"الحد الأدنى: {item.get('floor_price')} | {reason_ar}"
+            )
+
+        enriched = dict(item)
+        enriched["ai_suitability"] = suit
+        enriched["ai_score"] = round(max(0.0, min(100.0, score)), 1)
+        enriched["ai_reason_ar"] = reason_ar
+        enriched["ai_card_ar"] = card_ar
+        merged_list.append(enriched)
+
+    merged_list.sort(
+        key=lambda x: (
+            suitability_rank.get(x.get("ai_suitability", "unsuitable"), 2),
+            -float(x.get("ai_score", 0.0)),
+            float(x.get("hareth_distance_km", 9999.0)),
+        )
+    )
+
+    rec_count = sum(1 for x in merged_list if x.get("ai_suitability") == "recommended")
+    caution_count = sum(1 for x in merged_list if x.get("ai_suitability") == "caution")
+    top_picks = [x["ai_card_ar"] for x in merged_list if x.get("ai_suitability") == "recommended"][:5]
+
+    summary_ar = (
+        f"تم تحليل {len(merged_list)} حمولة لـ حارث (Fiat Ducato L4H2): "
+        f"{rec_count} موصى بها، و{caution_count} تحتاج تنبيهاً/مراجعة."
+    )
+
+    result_payload = {
+        "enabled": True,
+        "status": "partial_error" if batch_errors and not ai_by_key else "ok",
+        "model": GEMINI_MODEL,
+        "cached": False,
+        "errors": batch_errors,
+        "counts": {
+            "total": len(merged_list),
+            "recommended": rec_count,
+            "caution": caution_count,
+            "unsuitable": len(merged_list) - rec_count - caution_count,
+        },
+        "summary_ar": summary_ar,
+        "top_picks_ar": top_picks,
+        "ranked_loads": merged_list,
+    }
+
+    if ai_by_key:
+        with _AI_CACHE_LOCK:
+            _AI_CACHE[cache_sig] = (now, result_payload)
+
+    return result_payload
+
+
+# ==========================================
+# 6. جلب وفلترة الحمولات المباشرة
+# ==========================================
 def get_live_hareth_loads():
     max_pages = int(request.args.get("max_pages", "10"))
     max_pages = max(1, min(max_pages, 15))
+    ai_param = (request.args.get("ai", "1") or "1").strip().lower()
+    use_ai = ai_param not in ("0", "false", "no", "off")
+    force_refresh = (request.args.get("refresh_ai", "0") or "0").strip().lower() in ("1", "true", "yes")
 
     cookie_header = _get_active_cookie()
     headers = {
@@ -1035,6 +1300,21 @@ def get_live_hareth_loads():
 
         all_accepted.sort(key=lambda x: x["hareth_distance_km"])
 
+        if use_ai:
+            ai_analysis = analyze_all_freights_with_gemini(
+                all_audit=all_audit,
+                driver_loc=dict(hareth_live_location),
+                force_refresh=force_refresh,
+            )
+        else:
+            ai_analysis = {
+                "enabled": False,
+                "status": "disabled_by_query",
+                "model": GEMINI_MODEL,
+                "summary_ar": "تم تعطيل تحليل Gemini لهذا الطلب.",
+                "ranked_loads": [],
+            }
+
         payload = {
             "status": "success",
             "driver": "حارث",
@@ -1054,6 +1334,7 @@ def get_live_hareth_loads():
             },
             "loads": all_accepted,
             "audit_comparison": all_audit,
+            "ai_analysis": ai_analysis,
             "diagnostics": diag,
         }
         return jsonify(payload), 200
@@ -1084,6 +1365,8 @@ def home():
         "service": "eKurier Hareth Agent",
         "gps_active": hareth_live_location.get("lat") is not None,
         "cookie_configured": bool(_get_active_cookie()),
+        "gemini_configured": bool((os.environ.get("GEMINI_API_KEY") or "").strip()),
+        "gemini_model": GEMINI_MODEL,
         "auto_login_status": _LAST_LOGIN_STATUS,
         "login_debug": _LAST_LOGIN_DEBUG,
         "dynamic_cities_count": len(_DYNAMIC_COORDS),
