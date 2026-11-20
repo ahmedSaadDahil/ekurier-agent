@@ -1,575 +1,611 @@
-import os
-import re
-import math
-import time
-from datetime import datetime
-import httpx
+from flask import Flask, jsonify, request
 from bs4 import BeautifulSoup
-from flask import Flask, request, jsonify
+import httpx
+import math
+import re
+import os
+import json
+import threading
+import time
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 
-HARETH_WHATSAPP_NUMBER = "whatsapp:+4917656970147"
+# ==========================================
+# 1. إعدادات السيارة (Fiat Ducato L4H2)
+# ==========================================
+MAX_PAYLOAD_KG = 1360.0
+MAX_LENGTH_CM = 375.0
+MAX_WIDTH_CM = 170.0
+MAX_HEIGHT_CM = 195.0
 
-# مواصفات سيارة حارث المعتمدة (Fiat Ducato L4H2)
-HARETH_VEHICLE_SPECS = {
-    "model": "Fiat Ducato L4H2",
-    "max_payload_kg": 1360.0,
-    "max_payload_tons": 1.36,
-    "cargo_length_cm": 375.0,
-    "cargo_width_cm": 170.0,
-    "wheel_arch_width_cm": 135.0,
-    "wheel_arch_protrusion_cm": 27.0,
-}
+HEAVY_TRUCK_KEYWORDS = [
+    "7.5t", "7.5 t", "12t", "12 t", "18t", "18 t", "24t", "24 t",
+    "40t", "40 t", "sattel", "saddle", "mega", "jumbo", "tautliner",
+    "planensattel", "kühl", "frigo", "reefer", "wechselbrücke", "bdf",
+    "container", "kipper", "autotransporter", "schwertransport",
+    "lkw", "truck", "شاحنة", "تريلا", "مقطورة"
+]
 
-REAL_DRIVER_LOCATION = {
+# ==========================================
+# 2. تخزين موقع حارث الحي في الذاكرة
+# ==========================================
+hareth_live_location = {
     "lat": None,
     "lng": None,
-    "timestamp": "لم يتم استلام موقع GPS من الهاتف بعد",
+    "timestamp": None,
+    "accuracy": None,
+    "speed": None,
+    "device": "Hareth-Device"
 }
 
-SESSION_STORE = {
-    "client": None,
-    "last_login_time": 0,
-}
-
+# ==========================================
+# 3. قاموس إحداثيات المدن الأوروبية وألمانيا
+# ==========================================
 EU_CITIES_COORDS = {
-    "münchen": (48.1351, 11.5820), "munich": (48.1351, 11.5820),
-    "ingolstadt": (48.7665, 11.4258),
-    "nürnberg": (49.4521, 11.0767), "nuremberg": (49.4521, 11.0767),
-    "frankfurt": (50.1109, 8.6821),
-    "stuttgart": (48.7758, 9.1829),
+    # ألمانيا
     "berlin": (52.5200, 13.4050),
+    "برلين": (52.5200, 13.4050),
+    "münchen": (48.1351, 11.5820),
+    "munich": (48.1351, 11.5820),
+    "ميونخ": (48.1351, 11.5820),
     "hamburg": (53.5511, 9.9937),
-    "köln": (50.9375, 6.9603), "cologne": (50.9375, 6.9603),
-    "düsseldorf": (51.2217, 6.7762),
+    "هامبورغ": (53.5511, 9.9937),
+    "köln": (50.9375, 6.9603),
+    "cologne": (50.9375, 6.9603),
+    "كولونيا": (50.9375, 6.9603),
+    "frankfurt": (50.1109, 8.6821),
+    "frankfurt am main": (50.1109, 8.6821),
+    "فرانكفورت": (50.1109, 8.6821),
+    "stuttgart": (48.7758, 9.1829),
+    "شتوتغارت": (48.7758, 9.1829),
+    "düsseldorf": (51.2277, 6.7735),
+    "dusseldorf": (51.2277, 6.7735),
+    "دوسلدورف": (51.2277, 6.7735),
     "dortmund": (51.5136, 7.4653),
-    "leipzig": (51.3397, 12.3731),
-    "bremen": (53.0793, 8.8017),
-    "hannover": (52.3759, 9.7320),
+    "دورتموند": (51.5136, 7.4653),
     "essen": (51.4556, 7.0116),
+    "إيسن": (51.4556, 7.0116),
+    "leipzig": (51.3397, 12.3731),
+    "لايبزيغ": (51.3397, 12.3731),
+    "bremen": (53.0793, 8.8017),
+    "بريمن": (53.0793, 8.8017),
     "dresden": (51.0504, 13.7373),
-    "paris": (48.8566, 2.3522),
-    "vienna": (48.2082, 16.3738), "wien": (48.2082, 16.3738),
-    "amsterdam": (52.3676, 4.9041),
-    "brussels": (50.8503, 4.3517),
-    "prague": (50.0755, 14.4378),
-    "zossen": (52.2167, 13.4333),
-    "crailsheim": (49.1333, 10.0667),
-    "warngau": (47.8500, 11.7500),
-    "warstein": (51.4500, 8.3500),
-    "erkrath": (51.2167, 6.9167),
-    "amstetten": (48.5167, 9.8667),
-    "traiskirchen": (48.0166, 16.2833),
-    "amberg": (49.4447, 11.8536),
-    "villingen": (48.0625, 8.4619),
-    "styregg": (48.2500, 14.4167),
-    "kappelrodeck": (48.5667, 8.1000),
-    "calden": (51.4167, 9.4000),
-    "mannheim": (49.4875, 8.4660),
-    "antwerpen": (51.2194, 4.4025),
-    "stutensee": (49.0833, 8.4667),
-    "graz": (47.0707, 15.4395),
-    "strzelce": (50.5100, 18.2833),
-    "fahrenzhausen": (48.3333, 11.6000),
-    "sassenberg": (51.9833, 8.0333),
-    "bad soden": (50.3167, 9.5667),
-    "augsburg": (48.3705, 10.8978),
-    "burscheid": (51.1464, 7.1128),
-    "aichtal": (48.6333, 9.2667),
-    "haltern": (51.7458, 7.1853),
-    "sosnowiec": (50.2833, 19.2667),
-    "kupferzell": (49.2333, 9.6833),
-    "stapelfeld": (53.5833, 10.2167),
-    "siegen": (50.8749, 8.0229),
-    "schmalkalden": (50.7222, 10.4514),
-    "karlsruhe": (49.0069, 8.4037),
-    "friedrichshall": (49.2333, 9.2167),
-    "novo mesto": (45.8000, 15.1667),
-    "waidhofen": (48.8167, 15.2833),
-    "werdohl": (51.2500, 7.7500),
-    "schwechat": (48.1408, 16.4719),
-    "gründau": (50.2167, 9.1333),
-    "schwedt": (53.0667, 14.3000),
-    "ortenburg": (48.6667, 13.3167),
+    "دريسدن": (51.0504, 13.7373),
+    "hannover": (52.3759, 9.7320),
+    "هانوفر": (52.3759, 9.7320),
+    "nürnberg": (49.4521, 11.0767),
+    "nuremberg": (49.4521, 11.0767),
+    "نورنبرغ": (49.4521, 11.0767),
+    "duisburg": (51.4344, 6.7623),
+    "دويسبورغ": (51.4344, 6.7623),
+    "bochum": (51.4818, 7.2162),
+    "wuppertal": (51.2562, 7.1508),
+    "فوبرتال": (51.2562, 7.1508),
+    "bielefeld": (52.0302, 8.5325),
     "bonn": (50.7374, 7.0982),
-    "monte san pietro": (44.3956, 11.1539),
-    "las palmas": (28.1235, -15.4363),
-    "craiova": (44.3302, 23.7949),
-    "sighisoara": (46.2197, 24.7964),
-    "schwandorf": (49.3267, 12.1047),
-    "göttingen": (51.5413, 9.9158),
-    "wnzelsau": (49.2750, 9.7014),
-    "ingersheim": (48.9675, 9.1931),
+    "münster": (51.9607, 7.6261),
+    "karlsruhe": (49.0069, 8.4037),
+    "mannheim": (49.4875, 8.4660),
+    "مانهايم": (49.4875, 8.4660),
+    "augsburg": (48.3705, 10.8978),
+    "أوغسبورغ": (48.3705, 10.8978),
+    "wiesbaden": (50.0826, 8.2400),
+    "mönchengladbach": (51.1805, 6.4428),
+    "gelsenkirchen": (51.5177, 7.0857),
+    "aachen": (50.7753, 6.0839),
+    "braunschweig": (52.2689, 10.5268),
+    "براونشفايغ": (52.2689, 10.5268),
+    "chemnitz": (50.8278, 12.9214),
+    "kiel": (54.3233, 10.1228),
+    "halle": (51.4969, 11.9688),
+    "magdeburg": (52.1205, 11.6276),
+    "ماغديبورغ": (52.1205, 11.6276),
+    "freiburg": (47.9990, 7.8421),
+    "فرايبورغ": (47.9990, 7.8421),
     "krefeld": (51.3388, 6.5853),
-    "hofkirchen": (48.3667, 13.8667),
+    "lübeck": (53.8655, 10.6866),
+    "oberhausen": (51.4963, 6.8638),
+    "erfurt": (50.9848, 11.0299),
+    "mainz": (49.9929, 8.2473),
+    "rostock": (54.0924, 12.0991),
+    "kassel": (51.3127, 9.4797),
+    "hagen": (51.3671, 7.4633),
+    "saarbrücken": (49.2401, 6.9969),
+    "hamm": (51.6739, 7.8160),
+    "ludwigshafen": (49.4774, 8.4452),
+    "oldenburg": (53.1435, 8.2146),
+    "mülheim": (51.4275, 6.8825),
+    "osnabrück": (52.2799, 8.0472),
+    "leverkusen": (51.0459, 6.9844),
+    "heidelberg": (49.3988, 8.6724),
+    "هايدلبرغ": (49.3988, 8.6724),
+    "solingen": (51.1652, 7.0671),
+    "سولينجن": (51.1652, 7.0671),
+    "darmstadt": (49.8728, 8.6512),
+    "herne": (51.5388, 7.2257),
+    "regensburg": (49.0134, 12.1016),
+    "ريغنسبورغ": (49.0134, 12.1016),
+    "ingolstadt": (48.7665, 11.4258),
+    "paderborn": (51.7189, 8.7575),
+    "wolfsburg": (52.4227, 10.7865),
+    "würzburg": (49.7913, 9.9534),
+    "ulm": (48.4011, 9.9876),
+    "heilbronn": (49.1427, 9.2109),
+    "göttingen": (51.5413, 9.9158),
+    "recklinghausen": (51.6141, 7.1979),
+    "bottrop": (51.5215, 6.9292),
+    "بوتروب": (51.5215, 6.9292),
+    "remscheid": (51.1787, 7.1938),
+    "bremerhaven": (53.5396, 8.5809),
+    "koblenz": (50.3569, 7.5890),
+    "bergisch gladbach": (50.9918, 7.1367),
+    "jena": (50.9272, 11.5892),
+    "erlangen": (49.5897, 11.0039),
+    "إرلانجن": (49.5897, 11.0039),
+    "trier": (49.7499, 6.6371),
+    "moers": (51.4517, 6.6250),
+    "siegen": (50.8744, 8.0243),
+    "hildesheim": (52.1548, 9.9580),
+    "salzgitter": (52.1503, 10.3595),
+    "gütersloh": (51.9032, 8.3858),
+    "passau": (48.5667, 13.4319),
+    "leuna": (51.3167, 12.0167),
+    "freiberg am neckar": (48.9333, 13.3333),
+    "freiberg": (50.9119, 13.3428),
+    "kelsterbach": (50.0642, 8.5311),
+    "neutraubling": (48.9939, 12.2039),
+    "bergkirchen": (48.2553, 11.3631),
+    "freigericht": (50.1456, 9.1806),
+    "sinntal": (50.2833, 9.6333),
+    "rangendingen": (48.3817, 8.8861),
+    "bühl": (48.6958, 8.1353),
+    "baunatal": (51.2519, 9.4239),
+    "driedorf": (50.6333, 8.1667),
+    "einbeck": (51.8167, 9.8667),
+    "ahlen": (51.7633, 7.8906),
+    "spenge": (52.1419, 8.4819),
+    "wilnsdorf": (50.8000, 8.1000),
+    "bad waldsee": (47.9219, 9.7503),
+    "trierweiler": (49.7764, 6.5636),
+    "horb am neckar": (48.4453, 8.6906),
+    "nordhorn": (52.4333, 7.0667),
+    "lauterbach": (50.6383, 9.3972),
+    "norderstedt": (53.7000, 10.0000),
+    "billerbeck": (51.9772, 7.2911),
+    "wimsheim": (48.8478, 8.8489),
+    "amerang": (48.0000, 12.3167),
+    "kleinlangheim": (49.7667, 10.2833),
+    "rosswein": (51.0642, 13.1842),
+    "gollhofen": (49.5500, 10.1667),
+    "vierkirchen": (48.3667, 11.4500),
+    "egelsbach": (49.9667, 8.6667),
+    "atting": (48.8833, 12.5667),
+    "marktheidenfeld": (49.8458, 9.6022),
+    "geislingen": (48.6228, 9.8322),
+    "sindelfingen": (48.7133, 9.0028),
+    "ratingen": (51.3000, 6.8500),
+    "melle": (52.2033, 8.3389),
+    "velten": (52.6908, 13.1758),
+    "nauen": (52.6064, 12.8758),
+    "lahr": (48.3403, 7.8719),
+    "eichstätt": (48.8919, 11.1878),
+    "rheda-wiedenbrück": (51.8417, 8.3000),
+    "röthenbach": (49.4833, 11.2333),
+    "springe": (52.2089, 9.5558),
+    "hösbach": (50.0089, 9.2169),
+    "oberding": (48.3333, 11.7167),
+    "röttingen": (49.5106, 9.9672),
+    "burgwedel": (52.4917, 9.8583),
+    "neuwied": (50.4286, 7.4614),
+    "herten": (51.5964, 7.1369),
+    "neufahrn": (48.3167, 11.6667),
+    "neufahrn bei freising": (48.3167, 11.6667),
+    "hürth": (50.8781, 6.8764),
+    "dietzenbach": (50.0089, 8.7753),
+    "bad säckingen": (47.5536, 7.9519),
+    "schongau": (47.8136, 10.8969),
+    "köthen": (51.7514, 11.9739),
+    "bernau": (52.6792, 13.5872),
+    "bernau bei berlin": (52.6792, 13.5872),
+    "schwelm": (51.2889, 7.2944),
+    "filderstadt": (48.6667, 9.2167),
+    "pfreimd": (49.4936, 12.1819),
+    "planegg": (48.1061, 11.4253),
     "troisdorf": (50.8161, 7.1556),
-    "lastrup": (52.7833, 7.9833),
+    "luckau": (51.8492, 13.7131),
+    "gummersbach": (51.0239, 7.5628),
+    "neunkirchen": (49.3447, 7.1797),
+    "ungerhausen": (48.0167, 10.2667),
+    "billerbeck": (51.9772, 7.2911),
+    "baden-baden": (48.7606, 8.2398),
+    "sonnefeld": (50.2217, 11.1583),
+    "herzebrock-clarholz": (51.8875, 8.2333),
+    "bocholt": (51.8333, 6.6167),
+
+    # النمسا
+    "wien": (48.2082, 16.3738),
+    "vienna": (48.2082, 16.3738),
+    "graz": (47.0707, 15.4395),
+    "linz": (48.3069, 14.2858),
+    "salzburg": (47.8095, 13.0550),
+    "innsbruck": (47.2692, 11.4041),
+    "klagenfurt": (46.6247, 14.3053),
+    "schwechat": (48.1389, 16.4731),
+    "zeltweg": (47.1922, 14.7497),
+
+    # سويسرا
+    "zürich": (47.3769, 8.5417),
+    "zurich": (47.3769, 8.5417),
+    "geneva": (46.2044, 6.1432),
+    "genf": (46.2044, 6.1432),
+    "basel": (47.5596, 7.5886),
+    "bern": (46.9480, 7.4474),
+    "lausanne": (46.5197, 6.6323),
+    "winterthur": (47.4988, 8.7237),
+    "lucerne": (47.0502, 8.3093),
+    "luzern": (47.0502, 8.3093),
+    "zuchwil": (47.2089, 7.5628),
+    "schlieren": (47.3972, 8.4489),
+
+    # هولندا
+    "amsterdam": (52.3676, 4.9041),
+    "rotterdam": (51.9244, 4.4777),
+    "the hague": (52.0705, 4.3007),
+    "den haag": (52.0705, 4.3007),
+    "utrecht": (52.0907, 5.1214),
+    "eindhoven": (51.4416, 5.4697),
+    "tilburg": (51.5555, 5.0913),
+    "groningen": (53.2194, 6.5665),
+    "breda": (51.5719, 4.7683),
+    "nijmegen": (51.8126, 5.8372),
+    "arnhem": (51.9851, 5.8987),
+
+    # بلجيكا
+    "brussels": (50.8503, 4.3517),
+    "bruxelles": (50.8503, 4.3517),
+    "antwerp": (51.2194, 4.4025),
+    "antwerpen": (51.2194, 4.4025),
+    "ghent": (51.0543, 3.7174),
+    "gent": (51.0543, 3.7174),
+    "charleroi": (50.4108, 4.4446),
+    "liège": (50.6326, 5.5797),
+    "liege": (50.6326, 5.5797),
+    "bruges": (51.2093, 3.2247),
+    "willebroek": (51.0619, 4.3608),
+
+    # فرنسا
+    "paris": (48.8566, 2.3522),
+    "marseille": (43.2965, 5.3698),
+    "lyon": (45.7640, 4.8357),
+    "toulouse": (43.6047, 1.4442),
+    "nice": (43.7102, 7.2620),
+    "nantes": (47.2184, -1.5536),
+    "strasbourg": (48.5734, 7.7521),
+    "montpellier": (43.6108, 3.8767),
+    "bordeaux": (44.8378, -0.5792),
+    "lille": (50.6292, 3.0573),
+
+    # إيطاليا
+    "milano": (45.4642, 9.1900),
+    "milan": (45.4642, 9.1900),
+    "roma": (41.9028, 12.4964),
+    "rome": (41.9028, 12.4964),
+    "torino": (45.0703, 7.6869),
+    "turin": (45.0703, 7.6869),
+    "napoli": (40.8518, 14.2681),
+    "naples": (40.8518, 14.2681),
+    "bologna": (44.4949, 11.3426),
+    "firenze": (43.7696, 11.2558),
+    "florence": (43.7696, 11.2558),
+    "venezia": (45.4408, 12.3155),
+    "venice": (45.4408, 12.3155),
+    "verona": (45.4384, 10.9916),
+    "genova": (44.4056, 8.9463),
+    "palermo": (38.1157, 13.3615),
+    "lucera": (41.5075, 15.3350),
+    "livigno": (46.5389, 10.1356),
+
+    # بولندا / التشيك / سلوفاكيا / المجر / رومانيا / السويد
+    "warsaw": (52.2297, 21.0122),
+    "warszawa": (52.2297, 21.0122),
+    "krakow": (50.0647, 19.9450),
+    "wroclaw": (51.1079, 17.0385),
+    "praha": (50.0755, 14.4378),
+    "prague": (50.0755, 14.4378),
+    "brno": (49.1951, 16.6068),
+    "zebrak": (49.8756, 13.8894),
+    "rokycany": (49.7425, 13.5947),
+    "bratislava": (48.1486, 17.1077),
+    "budapest": (47.4979, 19.0402),
+    "bucharest": (44.4268, 26.1025),
+    "sighisoara": (46.2197, 24.7964),
+    "uppsala": (59.8586, 17.6389),
+    "أوبسالا": (59.8586, 17.6389),
+    "stockholm": (59.3293, 18.0686),
+    "gothenburg": (57.7089, 11.9746),
 }
 
+# ==========================================
+# 4. التضمين التلقائي الآمن للمدن غير الموجودة
+# ==========================================
+DYNAMIC_CITIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dynamic_cities.json")
+_GEO_LOCK = threading.Lock()
+_DYNAMIC_COORDS: dict[str, tuple[float, float]] = {}
+_FAILED_CITIES: set[str] = set()
 
-def _parse_number(num_str: str):
+
+def _load_dynamic_coords() -> None:
+    global _DYNAMIC_COORDS
+    if os.path.exists(DYNAMIC_CITIES_FILE):
+        try:
+            with open(DYNAMIC_CITIES_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+                if isinstance(raw, dict):
+                    _DYNAMIC_COORDS = {
+                        str(k).strip().lower(): (float(v[0]), float(v[1]))
+                        for k, v in raw.items()
+                        if isinstance(v, (list, tuple)) and len(v) == 2
+                    }
+        except Exception:
+            pass
+
+
+def _save_dynamic_coords() -> None:
     try:
-        return float(num_str.replace(" ", "").replace(",", "."))
+        with open(DYNAMIC_CITIES_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                {k: [v[0], v[1]] for k, v in sorted(_DYNAMIC_COORDS.items())},
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+    except Exception:
+        pass
+
+
+_load_dynamic_coords()
+
+
+def _normalize_city_name(raw: str) -> str:
+    s = (raw or "").strip().lower()
+    s = re.sub(r"\b[a-z]{1,3}[-\s]?\d[\d\w\*]*\b", " ", s, flags=re.IGNORECASE)
+    s = re.sub(r"\b\d{2,5}[\*\w]*\b", " ", s)
+    s = s.replace("*", " ")
+    s = re.sub(r"\s+", " ", s).strip(" ,-/")
+    return s
+
+
+def _geocode_city_lightweight(city_query: str) -> tuple[float, float] | None:
+    if not city_query or len(city_query) < 2:
+        return None
+    headers = {
+        "User-Agent": "eKurier-Hareth-Agent/1.0 (dispatch-assistant)",
+        "Accept": "application/json",
+    }
+    params = {
+        "q": city_query,
+        "format": "json",
+        "limit": 1,
+    }
+    try:
+        with httpx.Client(timeout=2.0, headers=headers) as client:
+            resp = client.get("https://nominatim.openstreetmap.org/search", params=params)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if isinstance(data, list) and data:
+                lat = float(data[0]["lat"])
+                lon = float(data[0]["lon"])
+                return (lat, lon)
     except Exception:
         return None
-
-
-def _clean_text_for_matching(text: str) -> str:
-    cleaned = text.lower()
-    cleaned = cleaned.replace("\ufffd", " ")
-    cleaned = re.sub(r"[*#]+", " ", cleaned)
-    cleaned = re.sub(r"\b\d{4,6}\b", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned
-
-
-def normalize_url(href):
-    if not href:
-        return None
-    href = href.strip()
-    if href.startswith("javascript:") or href.startswith("#") or href == "":
-        return None
-    if href.startswith("http://") or href.startswith("https://"):
-        return href
-    if href.startswith("/"):
-        return f"https://e-kurier.net{href}"
-    return f"https://e-kurier.net/portal/{href}"
-
-
-def extract_card_url(card, fallback_url="https://e-kurier.net/portal/freights"):
-    for attr in ["href", "data-href", "data-url"]:
-        norm = normalize_url(card.get(attr))
-        if norm:
-            return norm
-
-    links = card.find_all("a", href=True)
-    for a in links:
-        norm = normalize_url(a.get("href"))
-        if norm and any(
-            k in norm.lower()
-            for k in ["freight", "offer", "detail", "show", "bid", "load"]
-        ):
-            return norm
-
-    for a in links:
-        norm = normalize_url(a.get("href"))
-        if norm and "logout" not in norm.lower():
-            return norm
-
-    return fallback_url
-
-
-def get_active_client():
-    current_time = time.time()
-    if (
-        SESSION_STORE["client"] is not None
-        and (current_time - SESSION_STORE["last_login_time"] < 1800)
-    ):
-        return SESSION_STORE["client"]
-
-    username = os.environ.get("EKURIER_USER", "")
-    password = os.environ.get("EKURIER_PASS", "")
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-    }
-
-    client = httpx.Client(headers=headers, follow_redirects=True, timeout=15.0)
-    try:
-        login_page_url = "https://e-kurier.net/portal/login"
-        login_page = client.get(login_page_url)
-        soup_login = BeautifulSoup(login_page.text, "html.parser")
-
-        form_tag = soup_login.find("form")
-        form_action = login_page_url
-        if form_tag and form_tag.get("action"):
-            norm_action = normalize_url(form_tag.get("action"))
-            if norm_action:
-                form_action = norm_action
-
-        payload = {}
-        if form_tag:
-            for input_tag in form_tag.find_all("input"):
-                name = input_tag.get("name")
-                value = input_tag.get("value", "")
-                if name:
-                    payload[name] = value
-
-        payload["email"] = username
-        payload["password"] = password
-
-        client.post(form_action, data=payload)
-        SESSION_STORE["client"] = client
-        SESSION_STORE["last_login_time"] = current_time
-        return client
-    except Exception as e:
-        print(f"❌ [SESSION ERROR]: {e}")
-        return client
-
-
-def _exceeds_cargo_dimensions(text_lower: str):
-    max_len_cm = HARETH_VEHICLE_SPECS["cargo_length_cm"]
-    max_wid_cm = HARETH_VEHICLE_SPECS["cargo_width_cm"]
-
-    for m in re.finditer(
-        r"(\d+(?:[\.,]\d+)?)\s*[x×]\s*(\d+(?:[\.,]\d+)?)(?:\s*[x×]\s*(\d+(?:[\.,]\d+)?))?\s*(cm|m)\b",
-        text_lower,
-    ):
-        d1 = _parse_number(m.group(1))
-        d2 = _parse_number(m.group(2))
-        unit = m.group(4)
-        factor = 100.0 if unit == "m" else 1.0
-
-        dims_cm = [round(v * factor, 1) for v in (d1, d2) if v is not None]
-        if dims_cm:
-            longest_cm = max(dims_cm)
-            shortest_cm = min(dims_cm)
-            if longest_cm > max_len_cm or shortest_cm > max_wid_cm:
-                return f"أبعاد أكبر من الصندوق ({longest_cm}x{shortest_cm} cm)"
-
-    for m in re.finditer(
-        r"(\d+(?:[\.,]\d+)?)\s*(?:m\s*ldm|ldm\b|lademeter\b)",
-        text_lower,
-    ):
-        val_m = _parse_number(m.group(1))
-        if val_m is not None:
-            cm_val = round(val_m * 100.0, 1)
-            if cm_val > max_len_cm:
-                return f"طول التحميل المطلوب يتجاوز {max_len_cm} cm ({val_m} m ldm)"
-
-    for m in re.finditer(
-        r"(?:länge|length|طول|mind\.?)[^\d]{0,12}(\d+(?:[\.,]\d+)?)\s*(cm|m)\b",
-        text_lower,
-    ):
-        val = _parse_number(m.group(1))
-        unit = m.group(2)
-        if val is not None:
-            cm_val = round(val * 100.0 if unit == "m" else val, 1)
-            if cm_val > max_len_cm:
-                return f"الطول يتجاوز {max_len_cm} cm ({cm_val} cm)"
-
-    for m in re.finditer(
-        r"(?:breite|width|عرض)[^\d]{0,12}(\d+(?:[\.,]\d+)?)\s*(cm|m)\b",
-        text_lower,
-    ):
-        val = _parse_number(m.group(1))
-        unit = m.group(2)
-        if val is not None:
-            cm_val = round(val * 100.0 if unit == "m" else val, 1)
-            if cm_val > max_wid_cm:
-                return f"العرض يتجاوز {max_wid_cm} cm ({cm_val} cm)"
-
     return None
 
 
-def evaluate_load_suitability(card_text: str):
-    text_lower = card_text.lower()
-    max_kg = HARETH_VEHICLE_SPECS["max_payload_kg"]
+def resolve_city_coords(raw_location: str, lookups_remaining: list[int] | None = None) -> tuple[float, float] | None:
+    key = _normalize_city_name(raw_location)
+    if not key:
+        return None
 
-    heavy_truck_keywords = [
-        "sattel",
-        "tautliner",
-        "lkw",
-        "semi-trailer",
-        "mega",
-        "jumbo",
-        "aktions-lkw",
-        "szener",
-        "7.5t",
-        "7,5t",
-        "12t",
-        "18t",
-        "40t",
-    ]
-    for keyword in heavy_truck_keywords:
-        if keyword in text_lower:
-            return False, f"كلمة شاحنة ثقيلة: {keyword}"
+    if key in EU_CITIES_COORDS:
+        return EU_CITIES_COORDS[key]
 
-    kg_matches = re.findall(
-        r"(\d+(?:[\s\.,]\d+)?)\s*(?:kg|kg\.|kilogramm|كغ|كيلو)",
-        text_lower,
+    with _GEO_LOCK:
+        if key in _DYNAMIC_COORDS:
+            return _DYNAMIC_COORDS[key]
+        if key in _FAILED_CITIES:
+            return None
+        if lookups_remaining is not None and lookups_remaining[0] <= 0:
+            return None
+        if lookups_remaining is not None:
+            lookups_remaining[0] -= 1
+
+    time.sleep(1.05)
+    coords = _geocode_city_lightweight(key)
+    with _GEO_LOCK:
+        if coords is not None:
+            _DYNAMIC_COORDS[key] = coords
+            _save_dynamic_coords()
+        else:
+            _FAILED_CITIES.add(key)
+    return coords
+
+
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return round(2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a)), 1)
+
+
+def extract_city_coords(location_text: str, lookups_remaining: list[int] | None = None):
+    if not location_text:
+        return None
+    lower = location_text.lower()
+    for city_name, coords in EU_CITIES_COORDS.items():
+        if city_name in lower:
+            return coords
+    with _GEO_LOCK:
+        for city_name, coords in _DYNAMIC_COORDS.items():
+            if city_name in lower:
+                return coords
+    return resolve_city_coords(location_text, lookups_remaining=lookups_remaining)
+
+
+def parse_weight_to_kg(text: str):
+    if not text:
+        return None
+    lower = text.lower()
+    ton_match = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:t\b|ton\b|tons\b|tonnen\b|طن)', lower)
+    if ton_match:
+        val = float(ton_match.group(1).replace(",", "."))
+        return val * 1000.0
+    kg_match = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:kg\b|كجم|كيلو)', lower)
+    if kg_match:
+        val = float(kg_match.group(1).replace(",", "."))
+        return val
+    return None
+
+
+def evaluate_load_for_ducato(load_text: str):
+    lower = load_text.lower()
+
+    for kw in HEAVY_TRUCK_KEYWORDS:
+        if kw in lower:
+            return False, f"كلمة شاحنة ثقيلة: {kw}"
+
+    weight_kg = parse_weight_to_kg(lower)
+    if weight_kg is not None and weight_kg > MAX_PAYLOAD_KG:
+        return False, f"الوزن {weight_kg} كجم يتجاوز {MAX_PAYLOAD_KG} كجم"
+
+    dim_matches = re.findall(
+        r'(\d+(?:[.,]\d+)?)\s*[x×]\s*(\d+(?:[.,]\d+)?)(?:\s*[x×]\s*(\d+(?:[.,]\d+)?))?\s*(cm|m\b|سم|متر)?',
+        lower
     )
-    for w in kg_matches:
-        val_kg = _parse_number(w)
-        if val_kg is not None and val_kg > max_kg:
-            return False, f"الوزن {val_kg} kg يتجاوز {max_kg} kg"
-
-    ton_matches = re.findall(
-        r"(\d+(?:[\s\.,]\d+)?)\s*(?:t\b|ton\b|tons\b|tonne\b|tonnen\b|طن\b|أطنان\b)",
-        text_lower,
-    )
-    for w in ton_matches:
-        val_tons = _parse_number(w)
-        if val_tons is not None:
-            val_kg = round(val_tons * 1000.0, 1)
-            if val_kg > max_kg:
-                return False, f"الوزن {val_tons} t ({val_kg} kg) يتجاوز {max_kg} kg"
-
-    dim_reason = _exceeds_cargo_dimensions(text_lower)
-    if dim_reason:
-        return False, dim_reason
+    for m in dim_matches:
+        unit = m[3] or ""
+        factor = 100.0 if ("m" in unit and "cm" not in unit) or "متر" in unit else 1.0
+        dims = []
+        for x in (m[0], m[1], m[2]):
+            if x:
+                dims.append(float(x.replace(",", ".")) * factor)
+        if dims:
+            dims_sorted = sorted(dims, reverse=True)
+            if dims_sorted[0] > MAX_LENGTH_CM:
+                return False, f"طول {dims_sorted[0]} سم يتجاوز {MAX_LENGTH_CM} سم"
+            if len(dims_sorted) > 1 and dims_sorted[1] > MAX_WIDTH_CM:
+                return False, f"عرض {dims_sorted[1]} سم يتجاوز {MAX_WIDTH_CM} سم"
+            if len(dims_sorted) > 2 and dims_sorted[2] > MAX_HEIGHT_CM:
+                return False, f"ارتفاع {dims_sorted[2]} سم يتجاوز {MAX_HEIGHT_CM} سم"
 
     return True, "مناسب لـ Fiat Ducato L4H2"
 
 
-def is_suitable_for_fiat_ducato(card_text):
-    suitable, _ = evaluate_load_suitability(card_text)
-    return suitable
+def parse_freights_html(html_text: str, lookups_remaining: list[int] | None = None):
+    soup = BeautifulSoup(html_text, "html.parser")
+    raw_items = []
 
+    cards = soup.select("div.freight-item, div.card, tr.freight-row, article")
+    if not cards:
+        cards = soup.find_all(["div", "tr"], limit=120)
 
-def _extract_origin_destination(lines):
-    origin = "غير محدد"
-    destination = "غير محدد"
+    hareth_lat = hareth_live_location.get("lat")
+    hareth_lng = hareth_live_location.get("lng")
+    has_hareth_gps = hareth_lat is not None and hareth_lng is not None
 
-    for i, line in enumerate(lines):
-        low = line.lower().strip()
-        if low in ("loading:", "loading") and i + 1 < len(lines):
-            origin = lines[i + 1].strip()
-        elif low.startswith("loading:") and len(line) > len("loading:"):
-            origin = line.split(":", 1)[1].strip()
-        elif low in ("unloading:", "unloading") and i + 1 < len(lines):
-            destination = lines[i + 1].strip()
-        elif low.startswith("unloading:") and len(line) > len("unloading:"):
-            destination = line.split(":", 1)[1].strip()
-
-    if origin == "غير محدد" and len(lines) > 0:
-        origin = lines[0]
-    if destination == "غير محدد" and len(lines) > 1:
-        destination = lines[1]
-
-    return origin, destination
-
-
-def _extract_city_coords(origin: str, lines: list):
-    candidates = []
-    if origin and origin != "غير محدد":
-        candidates.append(_clean_text_for_matching(origin))
-    if lines:
-        candidates.append(_clean_text_for_matching(" ".join(lines[:4])))
-    candidates.append(_clean_text_for_matching(" ".join(lines)))
-
-    for text_block in candidates:
-        if not text_block:
+    idx = 0
+    for card in cards:
+        lines = [line.strip() for line in card.get_text("\n").splitlines() if line.strip()]
+        if len(lines) < 4:
             continue
-        for city, coords in sorted(
-            EU_CITIES_COORDS.items(), key=lambda x: len(x[0]), reverse=True
-        ):
-            if re.search(rf"(?<![a-zäöüß]){re.escape(city)}(?![a-zäöüß])", text_block):
-                return coords
-    return None
 
+        joined_text = " | ".join(lines)
+        if "loading" not in joined_text.lower() and "unloading" not in joined_text.lower():
+            continue
 
-def calculate_fast_road_distance(h_lat, h_lng, origin, lines):
-    target_coords = _extract_city_coords(origin, lines)
-    if target_coords is None:
-        return 9999.0
+        idx += 1
+        origin = "غير محدد"
+        destination = "غير محدد"
+        for i, line in enumerate(lines):
+            low = line.lower()
+            if low in ("loading", "loading:") and i + 1 < len(lines):
+                origin = lines[i + 1]
+            elif low in ("unloading", "unloading:") and i + 1 < len(lines):
+                destination = lines[i + 1]
 
-    c_lat, c_lng = target_coords
-    R = 6371.0
-    dlat = math.radians(c_lat - h_lat)
-    dlon = math.radians(c_lng - h_lng)
+        dist_match = re.search(r'(\d+(?:[.,]\d+)?)\s*km', joined_text.lower())
+        distance_km = float(dist_match.group(1).replace(",", ".")) if dist_match else 0.0
+        floor_price = round(distance_km * 1.56, 2) if distance_km > 0 else 0.0
 
-    lat1_rad = math.radians(h_lat)
-    lat2_rad = math.radians(c_lat)
+        hareth_distance_km = 9999.0
+        if has_hareth_gps:
+            origin_coords = extract_city_coords(origin, lookups_remaining=lookups_remaining)
+            if origin_coords:
+                hareth_distance_km = haversine_km(
+                    float(hareth_lat), float(hareth_lng), origin_coords[0], origin_coords[1]
+                )
 
-    a = (
-        math.sin(dlat / 2.0) ** 2
-        + math.cos(lat1_rad) * math.cos(lat2_rad) * (math.sin(dlon / 2.0) ** 2)
-    )
-    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
-    road_dist = R * c * 1.25
-    return round(road_dist, 1)
-
-
-def _extract_route_distance_km(lines):
-    for line in lines:
-        line_lower = line.lower()
-        if "km" in line_lower or "كم" in line_lower:
-            m = re.search(
-                r"(\d+(?:[\s\.,]\d+)?)\s*(?:km|كم)",
-                line_lower,
-            )
-            if m:
-                val = _parse_number(m.group(1))
-                if val is not None and val > 0:
-                    return round(val, 1)
-    return 100.0
-
-
-@app.route("/api/update-gps", methods=["POST"])
-def update_gps():
-    try:
-        data = request.get_json()
-        if data and "lat" in data and "lng" in data:
-            REAL_DRIVER_LOCATION["lat"] = float(data["lat"])
-            REAL_DRIVER_LOCATION["lng"] = float(data["lng"])
-            REAL_DRIVER_LOCATION["timestamp"] = data.get(
-                "timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            )
-            return jsonify({"status": "success", "location": REAL_DRIVER_LOCATION}), 200
-        return jsonify({"status": "error", "message": "بيانات غير صالحة"}), 400
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.route("/api/get-gps", methods=["GET"])
-def get_gps():
-    return jsonify({
-        "status": "success",
-        "driver": "حارث",
-        "location": REAL_DRIVER_LOCATION,
-    }), 200
-
-
-@app.route("/api/loads", methods=["GET"])
-def get_live_hareth_loads():
-    try:
-        req_lat = request.args.get("lat", type=float)
-        req_lng = request.args.get("lng", type=float)
-        max_distance_km = request.args.get("max_km", type=float)
-        max_pages = request.args.get("max_pages", default=10, type=int)
-        max_pages = max(1, min(max_pages, 50))
-
-        if req_lat is not None and req_lng is not None:
-            hareth_lat, hareth_lng = req_lat, req_lng
-            REAL_DRIVER_LOCATION["lat"] = hareth_lat
-            REAL_DRIVER_LOCATION["lng"] = hareth_lng
-            REAL_DRIVER_LOCATION["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        link_el = card.find("a", href=True)
+        href = link_el["href"] if link_el else ""
+        if href and href.startswith("/"):
+            offer_url = f"https://e-kurier.net{href}"
+        elif href.startswith("http"):
+            offer_url = href
         else:
-            hareth_lat = REAL_DRIVER_LOCATION.get("lat")
-            hareth_lng = REAL_DRIVER_LOCATION.get("lng")
+            offer_url = "https://e-kurier.net/portal/freights"
 
-        client = get_active_client()
-        freights_url = "https://e-kurier.net/portal/freights"
+        accepted, reason = evaluate_load_for_ducato(joined_text)
 
-        seen_signatures = set()
-        raw_items = []
-        pages_scanned = 0
+        item = {
+            "id": idx,
+            "origin": origin,
+            "destination": destination,
+            "distance_km": distance_km,
+            "floor_price": floor_price,
+            "hareth_distance_km": hareth_distance_km,
+            "max_payload_kg": MAX_PAYLOAD_KG,
+            "offer_url": offer_url,
+            "raw_lines": lines[:45],
+            "vehicle_match": "Fiat Ducato L4H2",
+            "accepted": accepted,
+            "filter_reason": reason,
+        }
+        raw_items.append(item)
 
-        for page_num in range(1, max_pages + 1):
-            target_page = f"{freights_url}?page={page_num}"
-            response = client.get(target_page)
+    accepted_loads = [x for x in raw_items if x["accepted"]]
+    accepted_loads.sort(key=lambda x: x["hareth_distance_km"])
 
-            if "login" in str(response.url).lower():
-                SESSION_STORE["client"] = None
-                client = get_active_client()
-                response = client.get(target_page)
-
-            if response.status_code != 200 or "login" in str(response.url).lower():
-                break
-
-            pages_scanned += 1
-            soup = BeautifulSoup(response.text, "html.parser")
-            cards = soup.find_all("article")
-            if not cards:
-                cards = soup.select(
-                    'div[class*="freight"], tr, div[class*="card"], li[class*="load"]'
-                )
-
-            new_cards_in_page = 0
-            for card in cards:
-                text = card.get_text(separator="\n", strip=True)
-                if len(text) > 15:
-                    lines = [line.strip() for line in text.split("\n") if line.strip()]
-                    sig = tuple(lines)
-                    if sig not in seen_signatures:
-                        seen_signatures.add(sig)
-                        new_cards_in_page += 1
-                        offer_url = extract_card_url(card, fallback_url=target_page)
-                        suitable, reason = evaluate_load_suitability(text)
-                        raw_items.append({
-                            "text": text,
-                            "lines": lines,
-                            "offer_url": offer_url,
-                            "accepted": suitable,
-                            "filter_reason": reason,
-                        })
-
-            if new_cards_in_page == 0:
-                break
-
-        formatted_loads = []
-        audit_comparison = []
-
-        for idx, item in enumerate(raw_items, start=1):
-            lines = item["lines"]
-            origin, destination = _extract_origin_destination(lines)
-            distance_km = _extract_route_distance_km(lines)
-
-            if hareth_lat is not None and hareth_lng is not None:
-                hareth_distance = calculate_fast_road_distance(
-                    hareth_lat, hareth_lng, origin, lines
-                )
-            else:
-                hareth_distance = 9999.0
-
-            floor_price = round(distance_km * 1.3 * 1.2, 2)
-
-            audit_comparison.append({
-                "id": idx,
-                "origin": origin,
-                "destination": destination,
-                "distance_km": distance_km,
-                "hareth_distance_km": hareth_distance,
-                "accepted": item["accepted"],
-                "filter_reason": item["filter_reason"],
-                "offer_url": item["offer_url"],
-            })
-
-            if not item["accepted"]:
-                continue
-
-            if max_distance_km is not None and hareth_distance > max_distance_km:
-                continue
-
-            formatted_loads.append({
-                "id": idx,
-                "origin": origin,
-                "destination": destination,
-                "distance_km": distance_km,
-                "hareth_distance_km": hareth_distance,
-                "floor_price": floor_price,
-                "max_payload_kg": HARETH_VEHICLE_SPECS["max_payload_kg"],
-                "vehicle_match": HARETH_VEHICLE_SPECS["model"],
-                "offer_url": item["offer_url"],
-                "raw_lines": lines,
-            })
-
-        formatted_loads.sort(key=lambda x: x["hareth_distance_km"])
-
-        return jsonify({
-            "status": "success",
-            "driver": "حارث",
-            "vehicle_specs": HARETH_VEHICLE_SPECS,
-            "gps_active": hareth_lat is not None and hareth_lng is not None,
-            "driver_location": REAL_DRIVER_LOCATION,
-            "sorted_by": "nearest_to_hareth_live_gps",
-            "pages_scanned": pages_scanned,
-            "total_raw_before_filter": len(audit_comparison),
-            "total_fetched": len(formatted_loads),
-            "loads": formatted_loads,
-            "audit_comparison": audit_comparison,
-        }), 200
-
-    except Exception as e:
-        print(f"❌ [CRITICAL ERROR]: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+    return accepted_loads, raw_items
 
 
-@app.route("/", methods=["GET"])
-def home_root():
-    return jsonify({
-        "status": "online",
-        "message": "E-Kurier Live-GPS & Ducato Agent Active",
-        "vehicle_specs": HARETH_VEHICLE_SPECS,
-    }), 200
+def get_live_hareth_loads():
+    max_pages = int(request.args.get("max_pages", "10"))
+    max_pages = max(1, min(max_pages, 15))
 
+    cookie_header = os.environ.get("EKURIER_COOKIE", "").strip()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    if cookie_header:
+        headers["Cookie"] = cookie_header
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    all_accepted = []
+    all_audit = []
+    pages_scanned = 0
+    lookups_remaining = [5]
+
+    try:
+        with httpx.Client(timeout=15.0, headers=headers, follow_redirects=True) as client:
+            for page in range(1, max_pages + 1):
+                url = f"https://e-kurier.net/portal/freights?page={page}"
+                resp = client.get(url)
+                if resp.status_code != 200 or not resp.text.strip():
+                    break
+                pages_scanned += 1
+                accepted, audit = parse_freights_html(resp.text, lookups_remaining=lookups_remaining)
+                if not audit:
