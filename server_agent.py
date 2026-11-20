@@ -246,4 +246,112 @@ def get_gps():
 
 
 @app.route("/api/loads", methods=["GET"])
-def get_live_hareth_
+def get_live_hareth_loads():
+    try:
+        req_lat = request.args.get('lat', type=float)
+        req_lng = request.args.get('lng', type=float)
+        max_distance_km = request.args.get('max_km', type=float)
+
+        if req_lat is not None and req_lng is not None:
+            hareth_lat, hareth_lng = req_lat, req_lng
+            REAL_DRIVER_LOCATION['lat'] = hareth_lat
+            REAL_DRIVER_LOCATION['lng'] = hareth_lng
+            REAL_DRIVER_LOCATION['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            hareth_lat = REAL_DRIVER_LOCATION.get('lat')
+            hareth_lng = REAL_DRIVER_LOCATION.get('lng')
+
+        client = get_active_client()
+        freights_url = "https://e-kurier.net/portal/freights"
+
+        seen_signatures = set()
+        raw_items = []
+
+        for page_num in range(1, 3):
+            target_page = f"{freights_url}?page={page_num}"
+            response = client.get(target_page)
+
+            if "login" in str(response.url).lower():
+                SESSION_STORE["client"] = None
+                client = get_active_client()
+                response = client.get(target_page)
+
+            if response.status_code == 200 and "login" not in str(response.url).lower():
+                soup = BeautifulSoup(response.text, 'html.parser')
+                cards = soup.find_all('article')
+                if not cards:
+                    cards = soup.select('div[class*="freight"], tr, div[class*="card"], li[class*="load"]')
+
+                for card in cards:
+                    text = card.get_text(separator='\n', strip=True)
+                    if len(text) > 15 and is_suitable_for_fiat_ducato(text):
+                        lines = [line.strip() for line in text.split('\n') if line.strip()]
+                        sig = tuple(lines)
+                        if sig not in seen_signatures:
+                            seen_signatures.add(sig)
+                            offer_url = extract_card_url(card, fallback_url=target_page)
+                            raw_items.append({
+                                "lines": lines,
+                                "offer_url": offer_url
+                            })
+
+        formatted_loads = []
+        for idx, item in enumerate(raw_items, start=1):
+            lines = item["lines"]
+            origin = lines[0] if len(lines) > 0 else "غير محدد"
+            destination = lines[1] if len(lines) > 1 else "غير محدد"
+
+            distance_km = 100.0
+            for line in lines:
+                if "km" in line.lower() or "كم" in line:
+                    nums = re.findall(r'\d+', line)
+                    if nums:
+                        distance_km = float(nums[0])
+                        break
+
+            if hareth_lat is not None and hareth_lng is not None:
+                hareth_distance = calculate_fast_road_distance(hareth_lat, hareth_lng, lines)
+            else:
+                hareth_distance = 9999.0
+
+            if max_distance_km is not None and hareth_distance > max_distance_km:
+                continue
+
+            floor_price = round(distance_km * 1.3 * 1.2, 2)
+
+            formatted_loads.append({
+                "id": idx,
+                "origin": origin,
+                "destination": destination,
+                "distance_km": distance_km,
+                "hareth_distance_km": hareth_distance,
+                "floor_price": floor_price,
+                "vehicle_match": "Fiat Ducato L4H2",
+                "offer_url": item["offer_url"],
+                "raw_lines": lines
+            })
+
+        formatted_loads.sort(key=lambda x: x['hareth_distance_km'])
+
+        return jsonify({
+            "status": "success",
+            "driver": "حارث",
+            "gps_active": hareth_lat is not None and hareth_lng is not None,
+            "driver_location": REAL_DRIVER_LOCATION,
+            "sorted_by": "nearest_to_hareth_live_gps",
+            "total_fetched": len(formatted_loads),
+            "loads": formatted_loads
+        }), 200
+
+    except Exception as e:
+        print(f"❌ [CRITICAL ERROR]: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/", methods=["GET"])
+def home_root():
+    return jsonify({"status": "online", "message": "E-Kurier Live-GPS & Ducato Agent Active"})
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
